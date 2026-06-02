@@ -6,12 +6,28 @@ type FileTreeNode = {
   path: string;
   type: 'file' | 'directory';
   size: number | null;
-  modifiedAt: string;
+  modifiedAt: string | null;
 };
 
 type ChatMessageInput = {
   role: 'user' | 'assistant';
   content: string;
+};
+
+type SessionRecord = {
+  id: string;
+  title: string;
+  workspacePath: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ChatMessageRecord = {
+  id: string;
+  sessionId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
 };
 
 type AiConfigInput = {
@@ -30,10 +46,22 @@ interface Window {
     }>;
     listFileTree: (directoryPath: string) => Promise<FileTreeNode[]>;
     sendMessage: (params: {
+      sessionId: string;
       content: string;
       history: ChatMessageInput[];
     }) => Promise<{
-      content: string;
+      userMessage: ChatMessageRecord;
+      assistantMessage: ChatMessageRecord;
+    }>;
+    createSession: (params: {
+      workspacePath: string | null;
+    }) => Promise<SessionRecord>;
+    listSessions: () => Promise<SessionRecord[]>;
+    getSession: (params: {
+      sessionId: string;
+    }) => Promise<{
+      session: SessionRecord;
+      messages: ChatMessageRecord[];
     }>;
     getAiConfig: () => Promise<{
       baseUrl: string;

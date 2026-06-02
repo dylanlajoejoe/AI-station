@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 
 type ChatMessage = {
   id: string;
+  sessionId?: string;
   role: 'user' | 'assistant';
   content: string;
+  createdAt?: string;
 };
 
 function formatFileSize(size: number | null) {
@@ -22,7 +24,11 @@ function formatFileSize(size: number | null) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function formatModifiedAt(value: string) {
+function formatModifiedAt(value: string | null) {
+  if (value === null) {
+    return '-';
+  }
+
   return new Date(value).toLocaleString('zh-CN', {
     hour12: false
   });
@@ -36,12 +42,15 @@ export function App() {
   const [fileTreeError, setFileTreeError] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [currentSession, setCurrentSession] = useState<SessionRecord | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModel, setAiModel] = useState('');
-  const [aiTimeoutMs, setAiTimeoutMs] = useState(30000);
+  const [aiTimeoutSeconds, setAiTimeoutSeconds] = useState(30);
   const [aiConfigStatus, setAiConfigStatus] = useState('未配置');
+  const [isAiConfigOpen, setIsAiConfigOpen] = useState(false);
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
 
@@ -49,10 +58,18 @@ export function App() {
     void window.aiWorkspace.getAiConfig().then((config) => {
       setAiBaseUrl(config.baseUrl);
       setAiModel(config.model);
-      setAiTimeoutMs(config.timeoutMs);
+      setAiTimeoutSeconds(Math.round(config.timeoutMs / 1000));
       setAiConfigStatus(config.hasApiKey ? '已加载配置' : '未配置');
     });
+    void window.aiWorkspace.listSessions().then(setSessions);
   }, []);
+
+  const handleOpenSession = async (sessionId: string) => {
+    const detail = await window.aiWorkspace.getSession({ sessionId });
+    setCurrentSession(detail.session);
+    setCurrentDirectory(detail.session.workspacePath);
+    setMessages(detail.messages);
+  };
 
   const handleSelectDirectory = async () => {
     const result = await window.aiWorkspace.selectDirectory();
@@ -68,7 +85,7 @@ export function App() {
         setFileTree(nodes);
       } catch {
         setFileTree([]);
-        setFileTreeError('目录读取失败，请确认目录仍可访问');
+        setFileTreeError('目录读取失败，请确认路径是否存在');
       }
     }
   };
@@ -112,19 +129,23 @@ export function App() {
     setIsSending(true);
 
     try {
+      const session = currentSession ?? await window.aiWorkspace.createSession({
+        workspacePath: currentDirectory
+      });
+      setCurrentSession(session);
+
       const result = await window.aiWorkspace.sendMessage({
+        sessionId: session.id,
         content,
         history
       });
 
       setMessages((currentMessages) => [
-        ...currentMessages,
-        {
-          id: `assistant-${createdAt}`,
-          role: 'assistant',
-          content: result.content
-        }
+        ...currentMessages.filter((message) => message.id !== userMessage.id),
+        result.userMessage,
+        result.assistantMessage
       ]);
+      void window.aiWorkspace.listSessions().then(setSessions);
     } catch (error) {
       setMessages((currentMessages) => [
         ...currentMessages,
@@ -144,7 +165,7 @@ export function App() {
       baseUrl: aiBaseUrl,
       apiKey: aiApiKey,
       model: aiModel,
-      timeoutMs: aiTimeoutMs
+      timeoutMs: aiTimeoutSeconds * 1000
     });
     setAiConfigStatus('已保存配置');
     setAiApiKey('');
@@ -160,6 +181,9 @@ export function App() {
         <div className="top-actions">
           <input className="search-input" placeholder="搜索当前目录" />
           <button className="ghost-button">列表视图</button>
+          <button className="ghost-button" onClick={() => setIsAiConfigOpen((isOpen) => !isOpen)}>
+            AI 配置：{aiConfigStatus}
+          </button>
           <span className="safe-badge">只读模式</span>
         </div>
       </header>
@@ -194,6 +218,20 @@ export function App() {
               </button>
             ))}
           </nav>
+          <div className="session-list-box">
+            <div className="panel-title">历史会话</div>
+            {sessions.length === 0 && <div className="folder-empty">暂无历史会话</div>}
+            {sessions.map((session) => (
+              <button
+                className={currentSession?.id === session.id ? 'session-item active' : 'session-item'}
+                key={session.id}
+                onClick={() => void handleOpenSession(session.id)}
+              >
+                <span>{session.title}</span>
+                <small>{new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small>
+              </button>
+            ))}
+          </div>
         </aside>
 
         <section className="file-panel">
@@ -230,36 +268,51 @@ export function App() {
         </section>
 
         <aside className="ai-panel">
-          <div className="ai-config-box">
-            <div className="ai-config-heading">
-              <p>AI 配置</p>
-              <span>{aiConfigStatus}</span>
+          {isAiConfigOpen && (
+            <div className="ai-config-box">
+              <div className="ai-config-heading">
+                <p>AI 配置</p>
+                <span>{aiConfigStatus}</span>
+              </div>
+              <label>
+                Base URL
+                <input
+                  onChange={(event) => setAiBaseUrl(event.target.value)}
+                  placeholder="例如 https://api.openai.com/v1"
+                  value={aiBaseUrl}
+                />
+              </label>
+              <label>
+                API Key
+                <input
+                  onChange={(event) => setAiApiKey(event.target.value)}
+                  placeholder="保存后不在前端显示"
+                  type="password"
+                  value={aiApiKey}
+                />
+              </label>
+              <label>
+                模型名
+                <input
+                  onChange={(event) => setAiModel(event.target.value)}
+                  placeholder="例如 gpt-4o-mini"
+                  value={aiModel}
+                />
+              </label>
+              <div className="ai-config-actions">
+                <label>
+                  超时时间(秒)
+                  <input
+                    onChange={(event) => setAiTimeoutSeconds(Number(event.target.value) || 30)}
+                    placeholder="默认 30 秒"
+                    type="number"
+                    value={aiTimeoutSeconds}
+                  />
+                </label>
+                <button onClick={() => void handleSaveAiConfig()}>保存配置</button>
+              </div>
             </div>
-            <input
-              onChange={(event) => setAiBaseUrl(event.target.value)}
-              placeholder="Base URL，例如 https://api.openai.com/v1"
-              value={aiBaseUrl}
-            />
-            <input
-              onChange={(event) => setAiApiKey(event.target.value)}
-              placeholder="API Key，保存后不在前端显示"
-              type="password"
-              value={aiApiKey}
-            />
-            <input
-              onChange={(event) => setAiModel(event.target.value)}
-              placeholder="模型名，例如 gpt-4o-mini"
-              value={aiModel}
-            />
-            <div className="ai-config-actions">
-              <input
-                onChange={(event) => setAiTimeoutMs(Number(event.target.value) || 30000)}
-                type="number"
-                value={aiTimeoutMs}
-              />
-              <button onClick={() => void handleSaveAiConfig()}>保存配置</button>
-            </div>
-          </div>
+          )}
           <div className="context-box">
             <p>当前引用文件</p>
             {selectedFiles.length > 0 ? (

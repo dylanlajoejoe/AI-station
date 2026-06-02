@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import Database from 'better-sqlite3';
 import { readdir, stat } from 'fs/promises';
 import path from 'path';
 
@@ -10,8 +11,25 @@ type ChatMessageInput = {
 };
 
 type SendMessageParams = {
+  sessionId: string;
   content: string;
   history: ChatMessageInput[];
+};
+
+type SessionRow = {
+  id: string;
+  title: string;
+  workspace_path: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type MessageRow = {
+  id: string;
+  session_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
 };
 
 type AiConfig = {
@@ -27,6 +45,54 @@ let aiConfig: Partial<AiConfig> = {
   model: process.env.AI_MODEL,
   timeoutMs: Number(process.env.AI_TIMEOUT_MS ?? 30000)
 };
+
+let db: Database.Database;
+
+function mapSession(row: SessionRow) {
+  return {
+    id: row.id,
+    title: row.title,
+    workspacePath: row.workspace_path,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapMessage(row: MessageRow) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    role: row.role,
+    content: row.content,
+    createdAt: row.created_at
+  };
+}
+
+function createId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function initDatabase() {
+  db = new Database(path.join(app.getPath('userData'), 'ai-workstation.db'));
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      workspace_path TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+  `);
+}
 
 function getRequiredConfig<K extends keyof AiConfig>(key: K, label: string) {
   const value = aiConfig[key];
@@ -74,21 +140,86 @@ ipcMain.handle('dialog:selectDirectory', async () => {
   };
 });
 
+ipcMain.handle('session:create', async (_event, params: { workspacePath: string | null }) => {
+  const now = new Date().toISOString();
+  const session = {
+    id: createId('session'),
+    title: '新会话',
+    workspace_path: params.workspacePath,
+    created_at: now,
+    updated_at: now
+  };
+
+  db.prepare(`
+    INSERT INTO sessions (id, title, workspace_path, created_at, updated_at)
+    VALUES (@id, @title, @workspace_path, @created_at, @updated_at)
+  `).run(session);
+
+  return mapSession(session);
+});
+
+ipcMain.handle('session:list', async () => {
+  const rows = db.prepare(`
+    SELECT id, title, workspace_path, created_at, updated_at
+    FROM sessions
+    ORDER BY updated_at DESC
+  `).all() as SessionRow[];
+
+  return rows.map(mapSession);
+});
+
+ipcMain.handle('session:get', async (_event, params: { sessionId: string }) => {
+  const session = db.prepare(`
+    SELECT id, title, workspace_path, created_at, updated_at
+    FROM sessions
+    WHERE id = ?
+  `).get(params.sessionId) as SessionRow | undefined;
+
+  if (!session) {
+    throw new Error('会话不存在');
+  }
+
+  const messages = db.prepare(`
+    SELECT id, session_id, role, content, created_at
+    FROM messages
+    WHERE session_id = ?
+    ORDER BY created_at ASC
+  `).all(params.sessionId) as MessageRow[];
+
+  return {
+    session: mapSession(session),
+    messages: messages.map(mapMessage)
+  };
+});
+
 ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
   const entries = await readdir(directoryPath, { withFileTypes: true });
   const nodes = await Promise.all(
     entries.map(async (entry) => {
       const entryPath = path.join(directoryPath, entry.name);
-      const entryStat = await stat(entryPath);
+      const entryType = entry.isDirectory() ? 'directory' : 'file';
 
-      return {
-        id: entryPath,
-        name: entry.name,
-        path: entryPath,
-        type: entry.isDirectory() ? 'directory' : 'file',
-        size: entry.isFile() ? entryStat.size : null,
-        modifiedAt: entryStat.mtime.toISOString()
-      };
+      try {
+        const entryStat = await stat(entryPath);
+
+        return {
+          id: entryPath,
+          name: entry.name,
+          path: entryPath,
+          type: entryType,
+          size: entry.isFile() ? entryStat.size : null,
+          modifiedAt: entryStat.mtime.toISOString()
+        };
+      } catch {
+        return {
+          id: entryPath,
+          name: entry.name,
+          path: entryPath,
+          type: entryType,
+          size: null,
+          modifiedAt: null
+        };
+      }
     })
   );
 
@@ -108,6 +239,19 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => 
   const timeoutMs = Number(aiConfig.timeoutMs ?? 30000);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const now = new Date().toISOString();
+  const userMessage = {
+    id: createId('message'),
+    session_id: params.sessionId,
+    role: 'user' as const,
+    content: params.content,
+    created_at: now
+  };
+
+  db.prepare(`
+    INSERT INTO messages (id, session_id, role, content, created_at)
+    VALUES (@id, @session_id, @role, @content, @created_at)
+  `).run(userMessage);
 
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -150,7 +294,28 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => 
       throw new Error('AI 返回内容为空');
     }
 
-    return { content };
+    const assistantMessage = {
+      id: createId('message'),
+      session_id: params.sessionId,
+      role: 'assistant' as const,
+      content,
+      created_at: new Date().toISOString()
+    };
+
+    db.prepare(`
+      INSERT INTO messages (id, session_id, role, content, created_at)
+      VALUES (@id, @session_id, @role, @content, @created_at)
+    `).run(assistantMessage);
+    db.prepare('UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?').run(
+      params.content.slice(0, 20) || '新会话',
+      assistantMessage.created_at,
+      params.sessionId
+    );
+
+    return {
+      userMessage: mapMessage(userMessage),
+      assistantMessage: mapMessage(assistantMessage)
+    };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('AI 接口请求超时');
@@ -185,6 +350,7 @@ function createMainWindow() {
 }
 
 void app.whenReady().then(() => {
+  initDatabase();
   createMainWindow();
 
   app.on('activate', () => {

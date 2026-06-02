@@ -11,15 +11,17 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
+    "better-sqlite3": "^12.10.0",
+    "concurrently": "latest",
+    "electron": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "electron": "latest",
-    "concurrently": "latest",
+    "typescript": "latest",
+    "vite": "latest",
     "wait-on": "latest"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest"
