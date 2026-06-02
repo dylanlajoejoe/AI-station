@@ -1,4 +1,8 @@
+import { useState } from 'react';
+
 export function App() {
+  const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
+
   const folders = ['客户资料', '2024 合同', '报价单', '访谈记录', '交付文档'];
   const selectedFile = {
     name: '客户访谈记录.md',
@@ -7,12 +11,20 @@ export function App() {
     modifiedAt: '2026-06-01 16:20'
   };
 
+  const handleSelectDirectory = async () => {
+    const result = await window.aiWorkspace.selectDirectory();
+
+    if (!result.canceled && result.path) {
+      setCurrentDirectory(result.path);
+    }
+  };
+
   return (
     <main className="workspace-shell">
       <header className="top-bar">
         <div>
           <p className="product-name">轻量级 AI 工作区连接器</p>
-          <div className="breadcrumb">文档 / 客户资料 / 2024 合同</div>
+          <div className="breadcrumb">{currentDirectory ?? '尚未选择本地目录'}</div>
         </div>
         <div className="top-actions">
           <input className="search-input" placeholder="搜索当前目录" />
@@ -25,9 +37,11 @@ export function App() {
         <aside className="folder-panel">
           <div className="folder-header">
             <div className="panel-title">文件目录</div>
-            <button className="add-folder-button">选择目录</button>
+            <button className="add-folder-button" onClick={handleSelectDirectory}>选择目录</button>
           </div>
-          <div className="current-directory">当前目录：D:\工作资料\客户A</div>
+          <div className="current-directory">
+            当前目录：{currentDirectory ?? '请选择一个本地目录'}
+          </div>
           <nav className="folder-list">
             {folders.map((folder) => (
               <button className={folder === '访谈记录' ? 'folder-item active' : 'folder-item'} key={folder}>

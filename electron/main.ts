@@ -1,7 +1,25 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'path';
 
 const isDev = !app.isPackaged;
+
+ipcMain.handle('dialog:selectDirectory', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openDirectory']
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return {
+      canceled: true,
+      path: null
+    };
+  }
+
+  return {
+    canceled: false,
+    path: result.filePaths[0]
+  };
+});
 
 function createMainWindow() {
   const mainWindow = new BrowserWindow({
