@@ -5,8 +5,10 @@
   "description": "轻量级 AI 工作区连接器",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"tsc -p electron/tsconfig.json --watch\" \"wait-on tcp:5173 dist-electron/main.js && electron dist-electron/main.js\"",
+    "dev": "concurrently -k \"vite\" \"tsc -p electron/tsconfig.json --watch\" \"wait-on tcp:5173 dist-electron/main.js && npm run rebuild:native && electron dist-electron/main.js\"",
     "build": "tsc -p electron/tsconfig.json && tsc -p tsconfig.json && vite build",
+    "postinstall": "npm run rebuild:native",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -21,6 +23,7 @@
     "wait-on": "latest"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "latest",
     "@types/react": "latest",

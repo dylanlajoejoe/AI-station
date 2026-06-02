@@ -23,6 +23,17 @@ body {
   min-height: 640px;
 }
 
+button,
+input {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid rgba(23, 74, 92, 0.35);
+  outline-offset: 2px;
+}
+
 .workspace-shell {
   min-height: 100vh;
   display: grid;
@@ -39,6 +50,7 @@ body {
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 250, 241, 0.88);
+  backdrop-filter: blur(14px);
 }
 
 .product-name {
@@ -49,6 +61,10 @@ body {
 }
 
 .breadcrumb {
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 13px;
 }
@@ -87,6 +103,13 @@ body {
   padding: 10px 12px;
   background: var(--panel-blue);
   color: var(--blue);
+}
+
+.ghost-button:hover,
+.add-folder-button:hover,
+.chat-input-row button:hover,
+.ai-config-actions button:hover {
+  filter: brightness(0.96);
 }
 
 .chat-input-row button,
@@ -139,7 +162,12 @@ body {
   box-shadow: 0 18px 46px rgba(47, 52, 55, 0.08);
 }
 
-.folder-panel,
+.folder-panel {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+}
+
 .ai-panel {
   padding: 16px;
 }
@@ -186,12 +214,22 @@ body {
   word-break: break-all;
 }
 
+.soft-note {
+  margin-bottom: 12px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  background: #eef5f2;
+  color: var(--green);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .folder-list {
-  display: grid;
+  display: block;
+  flex: 1;
   align-content: start;
-  gap: 4px;
   overflow: auto;
-  max-height: calc(100vh - 390px);
+  min-height: 140px;
 }
 
 .tree-node {
@@ -211,6 +249,12 @@ body {
   color: var(--text);
   text-align: left;
   cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.folder-item:hover,
+.session-item:hover {
+  background: rgba(234, 240, 242, 0.8);
 }
 
 .folder-item.selected {
@@ -235,6 +279,12 @@ body {
   font-weight: 700;
 }
 
+.tree-empty {
+  padding: 4px 10px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .folder-empty {
   padding: 12px;
   border: 1px dashed var(--line);
@@ -256,8 +306,11 @@ body {
 
 .session-list-box {
   display: grid;
+  flex: 0 0 auto;
   gap: 6px;
   margin-top: 16px;
+  max-height: 210px;
+  overflow: auto;
 }
 
 .session-item {
@@ -351,11 +404,12 @@ h1 {
 
 .file-preview p {
   margin: 0 0 14px;
+  overflow-wrap: anywhere;
 }
 
 .ai-panel {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
   background: rgba(234, 240, 242, 0.9);
 }
@@ -458,6 +512,7 @@ h1 {
   justify-content: flex-end;
   min-height: 0;
   overflow: auto;
+  padding-right: 2px;
 }
 
 .message-empty {
@@ -478,6 +533,7 @@ h1 {
   border-radius: 16px;
   font-size: 14px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .user-message {
@@ -512,4 +568,14 @@ h1 {
   background: rgba(255, 250, 241, 0.86);
   color: var(--muted);
   font-size: 12px;
+}
+
+@media (max-width: 1120px) {
+  .search-input {
+    display: none;
+  }
+
+  .breadcrumb {
+    max-width: 360px;
+  }
 }

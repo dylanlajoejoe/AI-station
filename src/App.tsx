@@ -273,6 +273,7 @@ export function App() {
           ].filter(Boolean).join(' ')}
           onClick={() => isDirectory ? void handleToggleDirectory(node) : handleNodeClick(node)}
           style={{ paddingLeft: 10 + level * 18 }}
+          title={node.path}
         >
           <span className="folder-icon">
             {isDirectory ? (node.isExpanded ? '▾' : '▸') : '•'}
@@ -282,6 +283,9 @@ export function App() {
           {isFileSelected && <span className="selected-mark">已选择</span>}
         </button>
         {isDirectory && node.isExpanded && node.children && renderFileTreeNodes(node.children, level + 1)}
+        {isDirectory && node.isExpanded && node.children?.length === 0 && (
+          <div className="tree-empty" style={{ paddingLeft: 34 + level * 18 }}>空文件夹</div>
+        )}
       </div>
     );
   });
@@ -312,13 +316,14 @@ export function App() {
             <div className="panel-title">文件目录</div>
             <button className="add-folder-button" onClick={handleSelectDirectory}>选择目录</button>
           </div>
-          <div className="current-directory">
+          <div className="current-directory" title={currentDirectory ?? ''}>
             当前目录：{currentDirectory ?? '请选择一个本地目录'}
           </div>
+          <div className="soft-note">当前仅浏览目录结构，不读取文件正文。</div>
           <nav className="folder-list">
             {fileTreeError && <div className="folder-empty">{fileTreeError}</div>}
             {!fileTreeError && fileTree.length === 0 && (
-              <div className="folder-empty">选择目录后显示文件和文件夹</div>
+              <div className="folder-empty">点击上方“选择目录”，这里会显示文件树。</div>
             )}
             {renderFileTreeNodes(fileTree)}
           </nav>
@@ -360,13 +365,13 @@ export function App() {
               <h2>{selectedNode?.name ?? '目录预览占位'}</h2>
               {selectedNode ? (
                 <>
-                  <p>路径：{selectedNode.path}</p>
+                  <p title={selectedNode.path}>路径：{selectedNode.path}</p>
                   <p>类型：{selectedNode.type === 'directory' ? '文件夹' : '文件'}</p>
                   <p>大小：{formatFileSize(selectedNode.size)}</p>
                   <p>修改时间：{formatModifiedAt(selectedNode.modifiedAt)}</p>
                 </>
               ) : (
-                <p>选择本地目录后，左侧会显示第一层文件和文件夹。点击条目后，这里显示基础信息。</p>
+                <p>选择目录后，点击左侧文件或文件夹，这里会显示名称、路径、大小和修改时间。</p>
               )}
             </article>
           </div>
@@ -434,7 +439,7 @@ export function App() {
           </div>
           <div className="message-list">
             {messages.length === 0 && (
-              <div className="message-empty">输入问题后，消息会显示在这里。</div>
+              <div className="message-empty">输入问题后开始对话。当前不会自动读取文件内容。</div>
             )}
             {messages.map((message) => (
               <div
