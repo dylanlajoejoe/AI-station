@@ -74,7 +74,6 @@ body {
 }
 
 .ghost-button,
-.primary-button,
 .chat-input-row button {
   border: 0;
   border-radius: 12px;
@@ -88,7 +87,6 @@ body {
   color: var(--blue);
 }
 
-.primary-button,
 .chat-input-row button {
   padding: 10px 14px;
   background: var(--blue);
@@ -128,11 +126,46 @@ body {
   padding: 16px;
 }
 
+.folder-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
 .panel-title {
   margin-bottom: 12px;
   color: var(--muted);
   font-size: 13px;
   font-weight: 700;
+}
+
+.folder-header .panel-title {
+  margin-bottom: 0;
+}
+
+.add-folder-button {
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--blue);
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.current-directory {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fffdf8;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
 }
 
 .folder-list {

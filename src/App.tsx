@@ -1,5 +1,5 @@
 export function App() {
-  const folders = ['桌面', '下载', '文档', '图片', '项目', '最近访问'];
+  const folders = ['客户资料', '2024 合同', '报价单', '访谈记录', '交付文档'];
   const selectedFile = {
     name: '客户访谈记录.md',
     type: 'Markdown',
@@ -23,10 +23,14 @@ export function App() {
 
       <section className="workspace-grid">
         <aside className="folder-panel">
-          <div className="panel-title">常用目录</div>
+          <div className="folder-header">
+            <div className="panel-title">文件目录</div>
+            <button className="add-folder-button">选择目录</button>
+          </div>
+          <div className="current-directory">当前目录：D:\工作资料\客户A</div>
           <nav className="folder-list">
             {folders.map((folder) => (
-              <button className={folder === '文档' ? 'folder-item active' : 'folder-item'} key={folder}>
+              <button className={folder === '访谈记录' ? 'folder-item active' : 'folder-item'} key={folder}>
                 <span className="folder-icon">▸</span>
                 {folder}
               </button>
@@ -40,7 +44,6 @@ export function App() {
               <h1>{selectedFile.name}</h1>
               <p>{selectedFile.type} · {selectedFile.size} · 修改于 {selectedFile.modifiedAt}</p>
             </div>
-            <button className="primary-button">选择目录</button>
           </div>
 
           <div className="preview-card">
