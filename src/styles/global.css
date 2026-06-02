@@ -188,36 +188,28 @@ h1 {
   font-size: 13px;
 }
 
-.file-table {
+.preview-card {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 16px;
   background: rgba(255, 253, 248, 0.72);
 }
 
-.file-row {
-  display: grid;
-  grid-template-columns: 1.8fr 0.8fr 0.7fr 0.8fr;
-  gap: 12px;
-  padding: 14px 16px;
+.preview-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid #edf1f2;
-  font-size: 14px;
-}
-
-.file-row:last-child {
-  border-bottom: 0;
-}
-
-.table-head {
   background: #eef3f4;
   color: var(--muted);
   font-size: 13px;
-  font-weight: 700;
 }
 
-.file-name {
-  color: var(--text);
-  font-weight: 700;
+.file-preview {
+  padding: 28px;
+  font-size: 14px;
+  line-height: 1.8;
 }
 
 .status-text {
@@ -225,9 +217,14 @@ h1 {
   font-weight: 700;
 }
 
-.risk-text {
-  color: var(--amber);
-  font-weight: 700;
+.file-preview h2 {
+  margin: 0 0 18px;
+  color: var(--blue);
+  font-size: 22px;
+}
+
+.file-preview p {
+  margin: 0 0 14px;
 }
 
 .ai-panel {

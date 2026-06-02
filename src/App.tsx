@@ -1,11 +1,11 @@
 export function App() {
   const folders = ['桌面', '下载', '文档', '图片', '项目', '最近访问'];
-  const files = [
-    { name: '2024 合同汇总', type: '文件夹', size: '-', status: '可访问' },
-    { name: '客户访谈记录.md', type: 'Markdown', size: '42 KB', status: '已选择' },
-    { name: '报价单.xlsx', type: 'Excel', size: '86 KB', status: '可访问' },
-    { name: '身份证扫描件.pdf', type: 'PDF', size: '1.8 MB', status: '风险提示' }
-  ];
+  const selectedFile = {
+    name: '客户访谈记录.md',
+    type: 'Markdown',
+    size: '42 KB',
+    modifiedAt: '2026-06-01 16:20'
+  };
 
   return (
     <main className="workspace-shell">
@@ -37,27 +37,23 @@ export function App() {
         <section className="file-panel">
           <div className="panel-heading">
             <div>
-              <h1>2024 合同</h1>
-              <p>4 个项目，当前目录可访问</p>
+              <h1>{selectedFile.name}</h1>
+              <p>{selectedFile.type} · {selectedFile.size} · 修改于 {selectedFile.modifiedAt}</p>
             </div>
             <button className="primary-button">选择目录</button>
           </div>
 
-          <div className="file-table">
-            <div className="file-row table-head">
-              <span>名称</span>
-              <span>类型</span>
-              <span>大小</span>
-              <span>状态</span>
+          <div className="preview-card">
+            <div className="preview-toolbar">
+              <span className="status-text">只读预览</span>
+              <span>当前只是界面占位，下一步才接真实文件读取</span>
             </div>
-            {files.map((file) => (
-              <div className="file-row" key={file.name}>
-                <span className="file-name">{file.name}</span>
-                <span>{file.type}</span>
-                <span>{file.size}</span>
-                <span className={file.status === '风险提示' ? 'risk-text' : 'status-text'}>{file.status}</span>
-              </div>
-            ))}
+            <article className="file-preview">
+              <h2>客户访谈记录</h2>
+              <p>客户希望把 2024 年合同、报价单和访谈记录整理成一份清晰摘要。</p>
+              <p>重点关注：合作范围、付款节点、交付时间、潜在风险。</p>
+              <p>用户可以在右侧向 AI 提问，AI 读取真实文件前需要先展示文件清单并等待确认。</p>
+            </article>
           </div>
         </section>
 
