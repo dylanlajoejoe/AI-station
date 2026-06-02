@@ -93,6 +93,11 @@ body {
   color: white;
 }
 
+.chat-input-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .safe-badge {
   padding: 8px 10px;
   border: 1px solid #c7d6d2;
@@ -171,6 +176,8 @@ body {
 .folder-list {
   display: grid;
   gap: 6px;
+  overflow: auto;
+  max-height: calc(100vh - 210px);
 }
 
 .folder-item {
@@ -185,6 +192,37 @@ body {
   color: var(--text);
   text-align: left;
   cursor: pointer;
+}
+
+.folder-item.selected {
+  border: 1px solid #b9d0c6;
+  background: #eef5f2;
+}
+
+.folder-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-mark {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: var(--green);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.folder-empty {
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .folder-item.active {
@@ -285,15 +323,48 @@ h1 {
   font-weight: 700;
 }
 
+.selected-file-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.selected-file-list button {
+  max-width: 100%;
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: #eef5f2;
+  color: var(--green);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .message-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
   justify-content: flex-end;
   min-height: 0;
+  overflow: auto;
+}
+
+.message-empty {
+  margin: auto 0;
+  padding: 16px;
+  border: 1px dashed var(--line);
+  border-radius: 16px;
+  background: rgba(255, 253, 248, 0.62);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
 }
 
 .message {
+  max-width: 88%;
   padding: 12px 14px;
   border-radius: 16px;
   font-size: 14px;

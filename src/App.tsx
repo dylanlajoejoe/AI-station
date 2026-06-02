@@ -1,21 +1,127 @@
 import { useState } from 'react';
 
+type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+};
+
+function formatFileSize(size: number | null) {
+  if (size === null) {
+    return '-';
+  }
+
+  if (size < 1024) {
+    return `${size} B`;
+  }
+
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatModifiedAt(value: string) {
+  return new Date(value).toLocaleString('zh-CN', {
+    hour12: false
+  });
+}
+
 export function App() {
   const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
+  const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const [selectedNode, setSelectedNode] = useState<FileTreeNode | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<FileTreeNode[]>([]);
+  const [fileTreeError, setFileTreeError] = useState<string | null>(null);
+  const [chatInput, setChatInput] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isSending, setIsSending] = useState(false);
 
-  const folders = ['客户资料', '2024 合同', '报价单', '访谈记录', '交付文档'];
-  const selectedFile = {
-    name: '客户访谈记录.md',
-    type: 'Markdown',
-    size: '42 KB',
-    modifiedAt: '2026-06-01 16:20'
-  };
+  const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
 
   const handleSelectDirectory = async () => {
     const result = await window.aiWorkspace.selectDirectory();
 
     if (!result.canceled && result.path) {
       setCurrentDirectory(result.path);
+      setSelectedNode(null);
+      setSelectedFiles([]);
+      setFileTreeError(null);
+
+      try {
+        const nodes = await window.aiWorkspace.listFileTree(result.path);
+        setFileTree(nodes);
+      } catch {
+        setFileTree([]);
+        setFileTreeError('目录读取失败，请确认目录仍可访问');
+      }
+    }
+  };
+
+  const handleNodeClick = (node: FileTreeNode) => {
+    setSelectedNode(node);
+
+    if (node.type !== 'file') {
+      return;
+    }
+
+    setSelectedFiles((currentFiles) => {
+      if (currentFiles.some((file) => file.id === node.id)) {
+        return currentFiles.filter((file) => file.id !== node.id);
+      }
+
+      return [...currentFiles, node];
+    });
+  };
+
+  const handleSendMessage = async () => {
+    const content = chatInput.trim();
+
+    if (!content || isSending) {
+      return;
+    }
+
+    const createdAt = Date.now();
+    const history = messages.map((message) => ({
+      role: message.role,
+      content: message.content
+    }));
+    const userMessage: ChatMessage = {
+      id: `user-${createdAt}`,
+      role: 'user',
+      content
+    };
+
+    setMessages((currentMessages) => [...currentMessages, userMessage]);
+    setChatInput('');
+    setIsSending(true);
+
+    try {
+      const result = await window.aiWorkspace.sendMessage({
+        content,
+        history
+      });
+
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: `assistant-${createdAt}`,
+          role: 'assistant',
+          content: result.content
+        }
+      ]);
+    } catch (error) {
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: `assistant-error-${createdAt}`,
+          role: 'assistant',
+          content: error instanceof Error ? error.message : 'AI 接口调用失败'
+        }
+      ]);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -43,10 +149,23 @@ export function App() {
             当前目录：{currentDirectory ?? '请选择一个本地目录'}
           </div>
           <nav className="folder-list">
-            {folders.map((folder) => (
-              <button className={folder === '访谈记录' ? 'folder-item active' : 'folder-item'} key={folder}>
-                <span className="folder-icon">▸</span>
-                {folder}
+            {fileTreeError && <div className="folder-empty">{fileTreeError}</div>}
+            {!fileTreeError && fileTree.length === 0 && (
+              <div className="folder-empty">选择目录后显示文件和文件夹</div>
+            )}
+            {fileTree.map((node) => (
+              <button
+                className={[
+                  'folder-item',
+                  selectedNode?.id === node.id ? 'active' : '',
+                  selectedFileIds.has(node.id) ? 'selected' : ''
+                ].filter(Boolean).join(' ')}
+                key={node.id}
+                onClick={() => handleNodeClick(node)}
+              >
+                <span className="folder-icon">{node.type === 'directory' ? '▸' : '•'}</span>
+                <span className="folder-name">{node.name}</span>
+                {selectedFileIds.has(node.id) && <span className="selected-mark">已选择</span>}
               </button>
             ))}
           </nav>
@@ -55,21 +174,32 @@ export function App() {
         <section className="file-panel">
           <div className="panel-heading">
             <div>
-              <h1>{selectedFile.name}</h1>
-              <p>{selectedFile.type} · {selectedFile.size} · 修改于 {selectedFile.modifiedAt}</p>
+              <h1>{selectedNode?.name ?? '未选择文件'}</h1>
+              <p>
+                {selectedNode
+                  ? `${selectedNode.type === 'directory' ? '文件夹' : '文件'} · ${formatFileSize(selectedNode.size)} · 修改于 ${formatModifiedAt(selectedNode.modifiedAt)}`
+                  : '请先从左侧目录中选择一个文件或文件夹'}
+              </p>
             </div>
           </div>
 
           <div className="preview-card">
             <div className="preview-toolbar">
               <span className="status-text">只读预览</span>
-              <span>当前只是界面占位，下一步才接真实文件读取</span>
+              <span>当前只读取目录结构和文件信息，不读取文件内容</span>
             </div>
             <article className="file-preview">
-              <h2>客户访谈记录</h2>
-              <p>客户希望把 2024 年合同、报价单和访谈记录整理成一份清晰摘要。</p>
-              <p>重点关注：合作范围、付款节点、交付时间、潜在风险。</p>
-              <p>用户可以在右侧向 AI 提问，AI 读取真实文件前需要先展示文件清单并等待确认。</p>
+              <h2>{selectedNode?.name ?? '目录预览占位'}</h2>
+              {selectedNode ? (
+                <>
+                  <p>路径：{selectedNode.path}</p>
+                  <p>类型：{selectedNode.type === 'directory' ? '文件夹' : '文件'}</p>
+                  <p>大小：{formatFileSize(selectedNode.size)}</p>
+                  <p>修改时间：{formatModifiedAt(selectedNode.modifiedAt)}</p>
+                </>
+              ) : (
+                <p>选择本地目录后，左侧会显示第一层文件和文件夹。点击条目后，这里显示基础信息。</p>
+              )}
             </article>
           </div>
         </section>
@@ -77,15 +207,44 @@ export function App() {
         <aside className="ai-panel">
           <div className="context-box">
             <p>当前引用文件</p>
-            <span>客户访谈记录.md</span>
+            {selectedFiles.length > 0 ? (
+              <div className="selected-file-list">
+                {selectedFiles.map((file) => (
+                  <button key={file.id} onClick={() => handleNodeClick(file)} title="点击取消选择">
+                    {file.name}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span>暂未选择文件</span>
+            )}
           </div>
           <div className="message-list">
-            <div className="message user-message">帮我总结这个客户的主要诉求。</div>
-            <div className="message ai-message">我会基于你选择的文件回答。读取前会先展示文件清单并等待确认。</div>
+            {messages.length === 0 && (
+              <div className="message-empty">输入问题后，消息会显示在这里。</div>
+            )}
+            {messages.map((message) => (
+              <div
+                className={message.role === 'user' ? 'message user-message' : 'message ai-message'}
+                key={message.id}
+              >
+                {message.content}
+              </div>
+            ))}
+            {isSending && <div className="message ai-message">AI 正在回复...</div>}
           </div>
           <div className="chat-input-row">
-            <input placeholder="输入问题，或先选择文件" />
-            <button>发送</button>
+            <input
+              onChange={(event) => setChatInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  void handleSendMessage();
+                }
+              }}
+              placeholder="输入问题，或先选择文件"
+              value={chatInput}
+            />
+            <button disabled={isSending} onClick={() => void handleSendMessage()}>{isSending ? '发送中' : '发送'}</button>
           </div>
         </aside>
       </section>
@@ -93,6 +252,7 @@ export function App() {
       <footer className="status-bar">
         <span>只读模式</span>
         <span>本次会话已读取 0 个文件</span>
+        <span>已选择 {selectedFiles.length} 个文件</span>
         <span>AI 读取记录</span>
       </footer>
     </main>
