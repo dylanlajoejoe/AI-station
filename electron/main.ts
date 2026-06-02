@@ -14,15 +14,47 @@ type SendMessageParams = {
   history: ChatMessageInput[];
 };
 
-function getRequiredEnv(name: string) {
-  const value = process.env[name];
+type AiConfig = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
+};
+
+let aiConfig: Partial<AiConfig> = {
+  baseUrl: process.env.AI_BASE_URL,
+  apiKey: process.env.AI_API_KEY,
+  model: process.env.AI_MODEL,
+  timeoutMs: Number(process.env.AI_TIMEOUT_MS ?? 30000)
+};
+
+function getRequiredConfig<K extends keyof AiConfig>(key: K, label: string) {
+  const value = aiConfig[key];
 
   if (!value) {
-    throw new Error(`${name} 未配置`);
+    throw new Error(`${label} 未配置`);
   }
 
   return value;
 }
+
+ipcMain.handle('config:getAiConfig', async () => ({
+  baseUrl: aiConfig.baseUrl ?? '',
+  model: aiConfig.model ?? '',
+  timeoutMs: aiConfig.timeoutMs ?? 30000,
+  hasApiKey: Boolean(aiConfig.apiKey)
+}));
+
+ipcMain.handle('config:setAiConfig', async (_event, config: AiConfig) => {
+  aiConfig = {
+    baseUrl: config.baseUrl.trim(),
+    apiKey: config.apiKey.trim(),
+    model: config.model.trim(),
+    timeoutMs: config.timeoutMs || 30000
+  };
+
+  return { ok: true };
+});
 
 ipcMain.handle('dialog:selectDirectory', async () => {
   const result = await dialog.showOpenDialog({
@@ -70,10 +102,10 @@ ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
 });
 
 ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => {
-  const baseUrl = getRequiredEnv('AI_BASE_URL').replace(/\/$/, '');
-  const apiKey = getRequiredEnv('AI_API_KEY');
-  const model = getRequiredEnv('AI_MODEL');
-  const timeoutMs = Number(process.env.AI_TIMEOUT_MS ?? 30000);
+  const baseUrl = String(getRequiredConfig('baseUrl', 'AI Base URL')).replace(/\/$/, '');
+  const apiKey = String(getRequiredConfig('apiKey', 'AI API Key'));
+  const model = String(getRequiredConfig('model', 'AI Model'));
+  const timeoutMs = Number(aiConfig.timeoutMs ?? 30000);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 

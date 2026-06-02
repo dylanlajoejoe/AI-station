@@ -14,6 +14,13 @@ type ChatMessageInput = {
   content: string;
 };
 
+type AiConfigInput = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
+};
+
 interface Window {
   aiWorkspace: {
     platform: NodeJS.Platform;
@@ -27,6 +34,15 @@ interface Window {
       history: ChatMessageInput[];
     }) => Promise<{
       content: string;
+    }>;
+    getAiConfig: () => Promise<{
+      baseUrl: string;
+      model: string;
+      timeoutMs: number;
+      hasApiKey: boolean;
+    }>;
+    setAiConfig: (config: AiConfigInput) => Promise<{
+      ok: boolean;
     }>;
   };
 }

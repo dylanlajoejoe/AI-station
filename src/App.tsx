@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 type ChatMessage = {
   id: string;
@@ -37,8 +37,22 @@ export function App() {
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [aiBaseUrl, setAiBaseUrl] = useState('');
+  const [aiApiKey, setAiApiKey] = useState('');
+  const [aiModel, setAiModel] = useState('');
+  const [aiTimeoutMs, setAiTimeoutMs] = useState(30000);
+  const [aiConfigStatus, setAiConfigStatus] = useState('未配置');
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
+
+  useEffect(() => {
+    void window.aiWorkspace.getAiConfig().then((config) => {
+      setAiBaseUrl(config.baseUrl);
+      setAiModel(config.model);
+      setAiTimeoutMs(config.timeoutMs);
+      setAiConfigStatus(config.hasApiKey ? '已加载配置' : '未配置');
+    });
+  }, []);
 
   const handleSelectDirectory = async () => {
     const result = await window.aiWorkspace.selectDirectory();
@@ -125,6 +139,17 @@ export function App() {
     }
   };
 
+  const handleSaveAiConfig = async () => {
+    await window.aiWorkspace.setAiConfig({
+      baseUrl: aiBaseUrl,
+      apiKey: aiApiKey,
+      model: aiModel,
+      timeoutMs: aiTimeoutMs
+    });
+    setAiConfigStatus('已保存配置');
+    setAiApiKey('');
+  };
+
   return (
     <main className="workspace-shell">
       <header className="top-bar">
@@ -205,6 +230,36 @@ export function App() {
         </section>
 
         <aside className="ai-panel">
+          <div className="ai-config-box">
+            <div className="ai-config-heading">
+              <p>AI 配置</p>
+              <span>{aiConfigStatus}</span>
+            </div>
+            <input
+              onChange={(event) => setAiBaseUrl(event.target.value)}
+              placeholder="Base URL，例如 https://api.openai.com/v1"
+              value={aiBaseUrl}
+            />
+            <input
+              onChange={(event) => setAiApiKey(event.target.value)}
+              placeholder="API Key，保存后不在前端显示"
+              type="password"
+              value={aiApiKey}
+            />
+            <input
+              onChange={(event) => setAiModel(event.target.value)}
+              placeholder="模型名，例如 gpt-4o-mini"
+              value={aiModel}
+            />
+            <div className="ai-config-actions">
+              <input
+                onChange={(event) => setAiTimeoutMs(Number(event.target.value) || 30000)}
+                type="number"
+                value={aiTimeoutMs}
+              />
+              <button onClick={() => void handleSaveAiConfig()}>保存配置</button>
+            </div>
+          </div>
           <div className="context-box">
             <p>当前引用文件</p>
             {selectedFiles.length > 0 ? (

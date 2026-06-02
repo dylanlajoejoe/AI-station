@@ -28,9 +28,25 @@ type SendMessageResult = {
   content: string;
 };
 
+type AiConfigInput = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
+};
+
+type AiConfigView = {
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
+  hasApiKey: boolean;
+};
+
 contextBridge.exposeInMainWorld('aiWorkspace', {
   platform: process.platform,
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
-  sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>
+  sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>,
+  getAiConfig: () => ipcRenderer.invoke('config:getAiConfig') as Promise<AiConfigView>,
+  setAiConfig: (config: AiConfigInput) => ipcRenderer.invoke('config:setAiConfig', config) as Promise<{ ok: boolean }>
 });
