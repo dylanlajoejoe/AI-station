@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 
 type ChatMessage = {
   id: string;
@@ -6,6 +7,12 @@ type ChatMessage = {
   role: 'user' | 'assistant';
   content: string;
   createdAt?: string;
+};
+
+type FileTreeViewNode = FileTreeNode & {
+  children?: FileTreeViewNode[];
+  isExpanded?: boolean;
+  isLoading?: boolean;
 };
 
 function formatFileSize(size: number | null) {
@@ -34,9 +41,30 @@ function formatModifiedAt(value: string | null) {
   });
 }
 
+function updateTreeNode(
+  nodes: FileTreeViewNode[],
+  nodeId: string,
+  updater: (node: FileTreeViewNode) => FileTreeViewNode
+): FileTreeViewNode[] {
+  return nodes.map((node) => {
+    if (node.id === nodeId) {
+      return updater(node);
+    }
+
+    if (node.children) {
+      return {
+        ...node,
+        children: updateTreeNode(node.children, nodeId, updater)
+      };
+    }
+
+    return node;
+  });
+}
+
 export function App() {
   const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
-  const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const [fileTree, setFileTree] = useState<FileTreeViewNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<FileTreeNode | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<FileTreeNode[]>([]);
   const [fileTreeError, setFileTreeError] = useState<string | null>(null);
@@ -51,6 +79,7 @@ export function App() {
   const [aiTimeoutSeconds, setAiTimeoutSeconds] = useState(30);
   const [aiConfigStatus, setAiConfigStatus] = useState('未配置');
   const [isAiConfigOpen, setIsAiConfigOpen] = useState(false);
+  const [folderPanelWidth, setFolderPanelWidth] = useState(260);
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
 
@@ -69,6 +98,25 @@ export function App() {
     setCurrentSession(detail.session);
     setCurrentDirectory(detail.session.workspacePath);
     setMessages(detail.messages);
+  };
+
+  const handleResizeFolderPanel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const startX = event.clientX;
+    const startWidth = folderPanelWidth;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.min(460, Math.max(220, startWidth + moveEvent.clientX - startX));
+      setFolderPanelWidth(nextWidth);
+    };
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
   };
 
   const handleSelectDirectory = async () => {
@@ -104,6 +152,45 @@ export function App() {
 
       return [...currentFiles, node];
     });
+  };
+
+  const handleToggleDirectory = async (node: FileTreeViewNode) => {
+    setSelectedNode(node);
+
+    if (node.type !== 'directory') {
+      return;
+    }
+
+    if (node.children) {
+      setFileTree((currentTree) => updateTreeNode(currentTree, node.id, (currentNode) => ({
+        ...currentNode,
+        isExpanded: !currentNode.isExpanded
+      })));
+      return;
+    }
+
+    setFileTree((currentTree) => updateTreeNode(currentTree, node.id, (currentNode) => ({
+      ...currentNode,
+      isExpanded: true,
+      isLoading: true
+    })));
+
+    try {
+      const children = await window.aiWorkspace.listFileTree(node.path);
+      setFileTree((currentTree) => updateTreeNode(currentTree, node.id, (currentNode) => ({
+        ...currentNode,
+        children,
+        isExpanded: true,
+        isLoading: false
+      })));
+    } catch {
+      setFileTree((currentTree) => updateTreeNode(currentTree, node.id, (currentNode) => ({
+        ...currentNode,
+        children: [],
+        isExpanded: true,
+        isLoading: false
+      })));
+    }
   };
 
   const handleSendMessage = async () => {
@@ -171,6 +258,34 @@ export function App() {
     setAiApiKey('');
   };
 
+  const renderFileTreeNodes = (nodes: FileTreeViewNode[], level = 0) => nodes.map((node) => {
+    const isDirectory = node.type === 'directory';
+    const isSelected = selectedNode?.id === node.id;
+    const isFileSelected = selectedFileIds.has(node.id);
+
+    return (
+      <div className="tree-node" key={node.id}>
+        <button
+          className={[
+            'folder-item',
+            isSelected ? 'active' : '',
+            isFileSelected ? 'selected' : ''
+          ].filter(Boolean).join(' ')}
+          onClick={() => isDirectory ? void handleToggleDirectory(node) : handleNodeClick(node)}
+          style={{ paddingLeft: 10 + level * 18 }}
+        >
+          <span className="folder-icon">
+            {isDirectory ? (node.isExpanded ? '▾' : '▸') : '•'}
+          </span>
+          <span className="folder-name">{node.name}</span>
+          {node.isLoading && <span className="selected-mark">加载中</span>}
+          {isFileSelected && <span className="selected-mark">已选择</span>}
+        </button>
+        {isDirectory && node.isExpanded && node.children && renderFileTreeNodes(node.children, level + 1)}
+      </div>
+    );
+  });
+
   return (
     <main className="workspace-shell">
       <header className="top-bar">
@@ -188,7 +303,10 @@ export function App() {
         </div>
       </header>
 
-      <section className="workspace-grid">
+      <section
+        className="workspace-grid"
+        style={{ gridTemplateColumns: `${folderPanelWidth}px 6px minmax(420px, 1fr) 390px` }}
+      >
         <aside className="folder-panel">
           <div className="folder-header">
             <div className="panel-title">文件目录</div>
@@ -202,21 +320,7 @@ export function App() {
             {!fileTreeError && fileTree.length === 0 && (
               <div className="folder-empty">选择目录后显示文件和文件夹</div>
             )}
-            {fileTree.map((node) => (
-              <button
-                className={[
-                  'folder-item',
-                  selectedNode?.id === node.id ? 'active' : '',
-                  selectedFileIds.has(node.id) ? 'selected' : ''
-                ].filter(Boolean).join(' ')}
-                key={node.id}
-                onClick={() => handleNodeClick(node)}
-              >
-                <span className="folder-icon">{node.type === 'directory' ? '▸' : '•'}</span>
-                <span className="folder-name">{node.name}</span>
-                {selectedFileIds.has(node.id) && <span className="selected-mark">已选择</span>}
-              </button>
-            ))}
+            {renderFileTreeNodes(fileTree)}
           </nav>
           <div className="session-list-box">
             <div className="panel-title">历史会话</div>
@@ -233,6 +337,7 @@ export function App() {
             ))}
           </div>
         </aside>
+        <div className="resize-handle" onPointerDown={handleResizeFolderPanel} />
 
         <section className="file-panel">
           <div className="panel-heading">

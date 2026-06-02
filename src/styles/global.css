@@ -113,10 +113,20 @@ body {
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: 260px minmax(420px, 1fr) 390px;
   gap: 14px;
   min-height: 0;
   padding: 14px;
+}
+
+.resize-handle {
+  width: 6px;
+  min-height: 0;
+  border-radius: 999px;
+  cursor: col-resize;
+}
+
+.resize-handle:hover {
+  background: rgba(23, 74, 92, 0.18);
 }
 
 .folder-panel,
@@ -178,9 +188,15 @@ body {
 
 .folder-list {
   display: grid;
-  gap: 6px;
+  align-content: start;
+  gap: 4px;
   overflow: auto;
   max-height: calc(100vh - 390px);
+}
+
+.tree-node {
+  display: grid;
+  gap: 4px;
 }
 
 .folder-item {
@@ -188,7 +204,7 @@ body {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 10px;
+  padding: 9px 10px;
   border: 0;
   border-radius: 12px;
   background: transparent;
