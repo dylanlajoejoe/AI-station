@@ -34,6 +34,22 @@ type SendMessageParams = {
   history: ChatMessageInput[];
   workspacePath: string | null;
   locatedPaths: LocatedPathResult[];
+  referencedFiles: ReferencedFileInput[];
+  allowSensitivePaths: boolean;
+};
+
+type ReferencedFileInput = {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+};
+
+type ReferencedFileContent = {
+  name: string;
+  path: string;
+  status: 'read' | 'skipped';
+  content: string | null;
+  message: string;
 };
 
 type WorkspaceTreeEntry = {
@@ -59,6 +75,7 @@ type SendMessageResult = {
   userMessage: ReturnType<typeof mapMessage>;
   assistantMessage: ReturnType<typeof mapMessage>;
   locatedPaths: LocatedPathResult[];
+  referencedFiles: ReferencedFileContent[];
 };
 
 type SessionRow = {
@@ -191,7 +208,11 @@ function extractPathCandidates(content: string) {
   return Array.from(candidates).filter(Boolean).slice(0, 20);
 }
 
-async function locatePathsInWorkspace(workspacePath: string | null, content: string): Promise<LocatedPathResult[]> {
+async function locatePathsInWorkspace(
+  workspacePath: string | null,
+  content: string,
+  allowSensitivePaths: boolean
+): Promise<LocatedPathResult[]> {
   if (!workspacePath) {
     return [];
   }
@@ -217,7 +238,7 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
       continue;
     }
 
-    if (hasFilteredPathSegment(workspacePath, resolvedPath)) {
+    if (!allowSensitivePaths && hasFilteredPathSegment(workspacePath, resolvedPath)) {
       results.push({
         input: candidate,
         status: 'filtered',
@@ -278,6 +299,131 @@ function formatLocatedPaths(results: LocatedPathResult[]) {
 
     return `- ${result.input}: 已定位 ${kind} ${result.path} (size: ${size}, modified: ${modifiedAt})`;
   }).join('\n');
+}
+
+async function readReferencedFiles(
+  workspacePath: string | null,
+  referencedFiles: ReferencedFileInput[],
+  allowSensitivePaths: boolean
+): Promise<ReferencedFileContent[]> {
+  if (!workspacePath) {
+    return referencedFiles.map((file) => ({
+      name: file.name,
+      path: file.path,
+      status: 'skipped',
+      content: null,
+      message: '未选择工作区，无法读取引用文件'
+    }));
+  }
+
+  const results: ReferencedFileContent[] = [];
+
+  for (const file of referencedFiles.slice(0, 10)) {
+    const resolvedPath = path.resolve(file.path);
+
+    if (!isInsideWorkspace(workspacePath, resolvedPath)) {
+      results.push({
+        name: file.name,
+        path: file.path,
+        status: 'skipped',
+        content: null,
+        message: '引用文件超出当前工作区，已拒绝读取'
+      });
+      continue;
+    }
+
+    if (!allowSensitivePaths && hasFilteredPathSegment(workspacePath, resolvedPath)) {
+      results.push({
+        name: file.name,
+        path: file.path,
+        status: 'skipped',
+        content: null,
+        message: '引用文件包含隐藏或敏感路径，已拒绝读取'
+      });
+      continue;
+    }
+
+    try {
+      const fileStat = await stat(resolvedPath);
+
+      if (!fileStat.isFile()) {
+        results.push({
+          name: file.name,
+          path: resolvedPath,
+          status: 'skipped',
+          content: null,
+          message: '引用的是文件夹，暂不读取内容'
+        });
+        continue;
+      }
+
+      if (fileStat.size > maxPreviewFileSize) {
+        results.push({
+          name: file.name,
+          path: resolvedPath,
+          status: 'skipped',
+          content: null,
+          message: '文件超过 1MB，已拒绝读取'
+        });
+        continue;
+      }
+
+      const extension = path.extname(resolvedPath).toLowerCase();
+
+      if (!previewableTextExtensions.has(extension)) {
+        results.push({
+          name: file.name,
+          path: resolvedPath,
+          status: 'skipped',
+          content: null,
+          message: '该文件类型暂不支持读取'
+        });
+        continue;
+      }
+
+      results.push({
+        name: file.name,
+        path: resolvedPath,
+        status: 'read',
+        content: await readFile(resolvedPath, 'utf8'),
+        message: '已读取引用文件内容'
+      });
+    } catch {
+      results.push({
+        name: file.name,
+        path: resolvedPath,
+        status: 'skipped',
+        content: null,
+        message: '引用文件不存在或无法读取'
+      });
+    }
+  }
+
+  if (referencedFiles.length > 10) {
+    results.push({
+      name: '引用文件数量限制',
+      path: '',
+      status: 'skipped',
+      content: null,
+      message: '最多读取前 10 个引用文件，其余已跳过'
+    });
+  }
+
+  return results;
+}
+
+function formatReferencedFiles(files: ReferencedFileContent[]) {
+  if (files.length === 0) {
+    return '用户未引用文件。';
+  }
+
+  return files.map((file) => {
+    if (file.status !== 'read') {
+      return `### ${file.name}\n路径：${file.path || '-'}\n状态：${file.message}`;
+    }
+
+    return `### ${file.name}\n路径：${file.path}\n状态：${file.message}\n内容：\n${file.content}`;
+  }).join('\n\n');
 }
 
 function formatWorkspaceTree(entries: WorkspaceTreeEntry[], wasTruncated: boolean) {
@@ -557,8 +703,8 @@ ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
   };
 });
 
-ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: string | null; content: string }) => {
-  return locatePathsInWorkspace(params.workspacePath, params.content);
+ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: string | null; content: string; allowSensitivePaths: boolean }) => {
+  return locatePathsInWorkspace(params.workspacePath, params.content, params.allowSensitivePaths);
 });
 
 ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Promise<SendMessageResult> => {
@@ -574,6 +720,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     ? formatWorkspaceTree(workspaceTree.entries, workspaceTree.wasTruncated)
     : '用户尚未选择工作区目录。';
   const locatedPathsText = formatLocatedPaths(params.locatedPaths);
+  const referencedFiles = await readReferencedFiles(params.workspacePath, params.referencedFiles, params.allowSensitivePaths);
+  const referencedFilesText = formatReferencedFiles(referencedFiles);
   const userMessage = {
     id: createId('message'),
     session_id: params.sessionId,
@@ -603,13 +751,17 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '你是一个桌面 AI 助手。',
               '你可以看到用户已选择工作区的目录结构摘要，包括文件名、文件夹名、大小和修改时间。',
               '如果用户消息里包含路径，系统会先在当前工作区内真实定位路径，并把定位结果提供给你。',
-              '你不能默认读取任何文件内容，不能假装已经看过文件内容。',
-              '如果需要文件内容，请明确要求用户引用文件或粘贴内容。',
+              '用户显式引用的文件内容会由系统读取后提供给你。',
+              '你只能使用系统提供的引用文件内容，不能假装读取未提供内容的文件。',
+              '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
               '不要建议扫描全盘，不要访问隐藏文件或敏感文件。',
               '',
               `当前工作区路径：${params.workspacePath ?? '未选择'}`,
               '用户消息路径定位结果：',
               locatedPathsText,
+              '',
+              '用户显式引用文件读取结果：',
+              referencedFilesText,
               '',
               '当前工作区目录结构摘要：',
               workspaceTreeText
@@ -663,7 +815,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     return {
       userMessage: mapMessage(userMessage),
       assistantMessage: mapMessage(assistantMessage),
-      locatedPaths: params.locatedPaths
+      locatedPaths: params.locatedPaths,
+      referencedFiles
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {

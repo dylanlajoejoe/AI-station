@@ -29,6 +29,8 @@ type FilePreviewState = {
 
 const fileContextMenuItems = ['添加到对话', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 const directoryContextMenuItems = ['添加到对话', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
+const sensitiveFileNames = new Set(['.env', '.env.local', '.env.development', '.env.production', 'credentials.json', 'secrets.json', 'id_rsa', 'id_ed25519']);
+const sensitiveDirectoryNames = new Set(['.git', 'node_modules', 'dist', 'dist-electron', 'build', 'out', '.vite']);
 
 function formatFileSize(size: number | null) {
   if (size === null) {
@@ -70,6 +72,55 @@ function formatLocatedPathSummary(results: LocatedPathResult[]) {
   });
 
   return `\n\n路径定位结果：\n${lines.join('\n')}`;
+}
+
+function formatReferencedFileSummary(results: ReferencedFileContent[]) {
+  if (results.length === 0) {
+    return '';
+  }
+
+  const lines = results.map((result) => `${result.status === 'read' ? '已读取' : '未读取'}：${result.name}（${result.message}）`);
+
+  return `\n\n引用文件读取结果：\n${lines.join('\n')}`;
+}
+
+function normalizePathCandidate(candidate: string) {
+  return candidate.trim().replace(/^["'“”‘’]+|["'“”‘’，。；;）)]+$/g, '');
+}
+
+function extractPathCandidates(content: string) {
+  const candidates = new Set<string>();
+  const quotedPattern = /["'“‘]([^"'”’]+)["'”’]/g;
+  const pathLikePattern = /(?:[A-Za-z]:)?[^\s"'“”‘’<>|]+[\\/][^\s"'“”‘’<>|]+/g;
+
+  for (const match of content.matchAll(quotedPattern)) {
+    const candidate = normalizePathCandidate(match[1]);
+
+    if (candidate.includes('/') || candidate.includes('\\')) {
+      candidates.add(candidate);
+    }
+  }
+
+  for (const match of content.matchAll(pathLikePattern)) {
+    candidates.add(normalizePathCandidate(match[0]));
+  }
+
+  return Array.from(candidates).filter(Boolean).slice(0, 20);
+}
+
+function hasSensitivePathSegment(pathValue: string) {
+  return pathValue.split(/[\\/]+/).some((segment) => {
+    const lowerSegment = segment.toLowerCase();
+
+    return segment.startsWith('.') || sensitiveFileNames.has(lowerSegment) || sensitiveDirectoryNames.has(segment);
+  });
+}
+
+function getSensitivePathInputs(content: string, files: FileTreeNode[]) {
+  const pathInputs = extractPathCandidates(content).filter(hasSensitivePathSegment);
+  const referencedInputs = files.filter((file) => hasSensitivePathSegment(file.path)).map((file) => file.path);
+
+  return Array.from(new Set([...pathInputs, ...referencedInputs]));
 }
 
 function updateTreeNode(
@@ -298,9 +349,27 @@ export function App() {
     setIsSending(true);
 
     try {
+      const sensitivePathInputs = getSensitivePathInputs(content, selectedFiles);
+      const allowSensitivePaths = sensitivePathInputs.length > 0
+        ? window.confirm(`以下路径包含隐藏或敏感目录/文件，是否允许本次定位或读取？\n\n${sensitivePathInputs.join('\n')}`)
+        : false;
+
+      if (sensitivePathInputs.length > 0 && !allowSensitivePaths) {
+        setMessages((currentMessages) => [
+          ...currentMessages,
+          {
+            id: `assistant-sensitive-denied-${createdAt}`,
+            role: 'assistant',
+            content: '已取消读取隐藏或敏感路径。'
+          }
+        ]);
+        return;
+      }
+
       const locatedPaths = await window.aiWorkspace.locatePaths({
         workspacePath: currentDirectory,
-        content
+        content,
+        allowSensitivePaths
       });
       const session = currentSession ?? await window.aiWorkspace.createSession({
         workspacePath: currentDirectory
@@ -312,14 +381,20 @@ export function App() {
         content,
         history,
         workspacePath: currentDirectory,
-        locatedPaths
+        locatedPaths,
+        referencedFiles: selectedFiles.map((file) => ({
+          name: file.name,
+          path: file.path,
+          type: file.type
+        })),
+        allowSensitivePaths
       });
 
       setMessages((currentMessages) => [
         ...currentMessages.filter((message) => message.id !== userMessage.id),
         {
           ...result.userMessage,
-          content: `${result.userMessage.content}${formatLocatedPathSummary(result.locatedPaths)}`
+          content: `${result.userMessage.content}${formatLocatedPathSummary(result.locatedPaths)}${formatReferencedFileSummary(result.referencedFiles)}`
         },
         result.assistantMessage
       ]);
@@ -562,9 +637,7 @@ export function App() {
                       onClick={() => handleRemoveReferenceFile(file)}
                       title="移除引用"
                       type="button"
-                    >
-                      ×
-                    </button>
+                    />
                   </span>
                 ))}
               </div>

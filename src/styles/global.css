@@ -581,9 +581,9 @@ h1 {
 }
 
 .selected-file-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   max-width: 100%;
   border-radius: 999px;
   padding: 7px 10px;
@@ -600,22 +600,38 @@ h1 {
 }
 
 .remove-reference-button {
-  display: inline-grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  margin-right: -3px;
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 16px;
+  height: 16px;
   border: 0;
   border-radius: 999px;
-  background: rgba(47, 52, 55, 0.12);
-  color: var(--green);
+  background: #dfeae6;
   cursor: pointer;
-  font-size: 15px;
-  font-weight: 800;
-  line-height: 1;
   opacity: 0;
   transform: scale(0.86);
   transition: opacity 0.14s ease, transform 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.remove-reference-button::before,
+.remove-reference-button::after {
+  position: absolute;
+  top: 7px;
+  left: 4px;
+  width: 8px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--green);
+  content: "";
+}
+
+.remove-reference-button::before {
+  transform: rotate(45deg);
+}
+
+.remove-reference-button::after {
+  transform: rotate(-45deg);
 }
 
 .selected-file-chip:hover .remove-reference-button,
@@ -626,7 +642,11 @@ h1 {
 
 .remove-reference-button:hover {
   background: var(--green);
-  color: white;
+}
+
+.remove-reference-button:hover::before,
+.remove-reference-button:hover::after {
+  background: white;
 }
 
 .message-list {

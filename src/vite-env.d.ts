@@ -52,6 +52,20 @@ type LocatedPathResult = {
   message: string;
 };
 
+type ReferencedFileInput = {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+};
+
+type ReferencedFileContent = {
+  name: string;
+  path: string;
+  status: 'read' | 'skipped';
+  content: string | null;
+  message: string;
+};
+
 interface Window {
   aiWorkspace: {
     platform: NodeJS.Platform;
@@ -64,6 +78,7 @@ interface Window {
     locatePaths: (params: {
       workspacePath: string | null;
       content: string;
+      allowSensitivePaths: boolean;
     }) => Promise<LocatedPathResult[]>;
     sendMessage: (params: {
       sessionId: string;
@@ -71,10 +86,13 @@ interface Window {
       history: ChatMessageInput[];
       workspacePath: string | null;
       locatedPaths: LocatedPathResult[];
+      referencedFiles: ReferencedFileInput[];
+      allowSensitivePaths: boolean;
     }) => Promise<{
       userMessage: ChatMessageRecord;
       assistantMessage: ChatMessageRecord;
       locatedPaths: LocatedPathResult[];
+      referencedFiles: ReferencedFileContent[];
     }>;
     createSession: (params: {
       workspacePath: string | null;
