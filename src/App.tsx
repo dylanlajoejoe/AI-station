@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent } from 'react';
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 
 type ChatMessage = {
   id: string;
@@ -14,6 +14,15 @@ type FileTreeViewNode = FileTreeNode & {
   isExpanded?: boolean;
   isLoading?: boolean;
 };
+
+type ContextMenuState = {
+  x: number;
+  y: number;
+  node: FileTreeViewNode;
+} | null;
+
+const fileContextMenuItems = ['添加到对话', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
+const directoryContextMenuItems = ['添加到对话', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 
 function formatFileSize(size: number | null) {
   if (size === null) {
@@ -80,6 +89,7 @@ export function App() {
   const [aiConfigStatus, setAiConfigStatus] = useState('未配置');
   const [isAiConfigOpen, setIsAiConfigOpen] = useState(false);
   const [folderPanelWidth, setFolderPanelWidth] = useState(260);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
 
@@ -91,6 +101,18 @@ export function App() {
       setAiConfigStatus(config.hasApiKey ? '已加载配置' : '未配置');
     });
     void window.aiWorkspace.listSessions().then(setSessions);
+  }, []);
+
+  useEffect(() => {
+    const closeContextMenu = () => setContextMenu(null);
+
+    window.addEventListener('click', closeContextMenu);
+    window.addEventListener('resize', closeContextMenu);
+
+    return () => {
+      window.removeEventListener('click', closeContextMenu);
+      window.removeEventListener('resize', closeContextMenu);
+    };
   }, []);
 
   const handleOpenSession = async (sessionId: string) => {
@@ -140,18 +162,31 @@ export function App() {
 
   const handleNodeClick = (node: FileTreeNode) => {
     setSelectedNode(node);
+  };
 
-    if (node.type !== 'file') {
-      return;
-    }
+  const handleNodeContextMenu = (event: ReactMouseEvent, node: FileTreeViewNode) => {
+    event.preventDefault();
+    setSelectedNode(node);
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      node
+    });
+  };
 
+  const handleAddToChat = (node: FileTreeNode) => {
     setSelectedFiles((currentFiles) => {
       if (currentFiles.some((file) => file.id === node.id)) {
-        return currentFiles.filter((file) => file.id !== node.id);
+        return currentFiles;
       }
 
       return [...currentFiles, node];
     });
+    setContextMenu(null);
+  };
+
+  const handleRemoveReferenceFile = (node: FileTreeNode) => {
+    setSelectedFiles((currentFiles) => currentFiles.filter((file) => file.id !== node.id));
   };
 
   const handleToggleDirectory = async (node: FileTreeViewNode) => {
@@ -272,6 +307,7 @@ export function App() {
             isFileSelected ? 'selected' : ''
           ].filter(Boolean).join(' ')}
           onClick={() => isDirectory ? void handleToggleDirectory(node) : handleNodeClick(node)}
+          onContextMenu={(event) => handleNodeContextMenu(event, node)}
           style={{ paddingLeft: 10 + level * 18 }}
           title={node.path}
         >
@@ -289,6 +325,33 @@ export function App() {
       </div>
     );
   });
+
+  const renderContextMenu = () => {
+    if (!contextMenu) {
+      return null;
+    }
+
+    const items = contextMenu.node.type === 'directory' ? directoryContextMenuItems : fileContextMenuItems;
+
+    return (
+      <div
+        className="context-menu"
+        onClick={(event) => event.stopPropagation()}
+        style={{ left: contextMenu.x, top: contextMenu.y }}
+      >
+        {items.map((item) => (
+          <button
+            className={item === '添加到对话' ? 'context-menu-item primary' : 'context-menu-item'}
+            disabled={item !== '添加到对话'}
+            key={item}
+            onClick={() => item === '添加到对话' && handleAddToChat(contextMenu.node)}
+          >
+            {item}
+          </button>
+        ))}
+      </div>
+    );
+  };
 
   return (
     <main className="workspace-shell">
@@ -428,7 +491,7 @@ export function App() {
             {selectedFiles.length > 0 ? (
               <div className="selected-file-list">
                 {selectedFiles.map((file) => (
-                  <button key={file.id} onClick={() => handleNodeClick(file)} title="点击取消选择">
+                  <button key={file.id} onClick={() => handleRemoveReferenceFile(file)} title="点击移除引用">
                     {file.name}
                   </button>
                 ))}
@@ -459,7 +522,7 @@ export function App() {
                   void handleSendMessage();
                 }
               }}
-              placeholder="输入问题，或先选择文件"
+              placeholder="输入问题，或右键文件添加到对话"
               value={chatInput}
             />
             <button disabled={isSending} onClick={() => void handleSendMessage()}>{isSending ? '发送中' : '发送'}</button>
@@ -469,10 +532,10 @@ export function App() {
 
       <footer className="status-bar">
         <span>只读模式</span>
-        <span>本次会话已读取 0 个文件</span>
-        <span>已选择 {selectedFiles.length} 个文件</span>
-        <span>AI 读取记录</span>
+        <span>当前只读取目录结构和文件信息</span>
+        <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
       </footer>
+      {renderContextMenu()}
     </main>
   );
 }
