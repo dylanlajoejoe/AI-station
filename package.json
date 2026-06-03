@@ -12,21 +12,21 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "better-sqlite3": "^12.10.0",
-    "concurrently": "latest",
-    "electron": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "typescript": "latest",
-    "vite": "latest",
-    "wait-on": "latest"
+    "@vitejs/plugin-react": "5.1.1",
+    "better-sqlite3": "12.10.0",
+    "concurrently": "9.2.1",
+    "electron": "37.5.1",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "typescript": "5.9.3",
+    "vite": "7.1.12",
+    "wait-on": "9.0.1"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest"
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3"
   }
 }
