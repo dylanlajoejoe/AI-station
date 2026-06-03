@@ -14,6 +14,10 @@ type FileTreeNode = {
   modifiedAt: string | null;
 };
 
+type TextPreviewResult = {
+  content: string;
+};
+
 type ChatMessageInput = {
   role: 'user' | 'assistant';
   content: string;
@@ -64,6 +68,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   platform: process.platform,
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
+  readTextPreview: (filePath: string) => ipcRenderer.invoke('file:readTextPreview', filePath) as Promise<TextPreviewResult>,
   sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>,
   createSession: (params: { workspacePath: string | null }) => ipcRenderer.invoke('session:create', params) as Promise<SessionRecord>,
   listSessions: () => ipcRenderer.invoke('session:list') as Promise<SessionRecord[]>,

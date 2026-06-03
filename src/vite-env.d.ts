@@ -14,6 +14,10 @@ type ChatMessageInput = {
   content: string;
 };
 
+type TextPreviewResult = {
+  content: string;
+};
+
 type SessionRecord = {
   id: string;
   title: string;
@@ -45,6 +49,7 @@ interface Window {
       path: string | null;
     }>;
     listFileTree: (directoryPath: string) => Promise<FileTreeNode[]>;
+    readTextPreview: (filePath: string) => Promise<TextPreviewResult>;
     sendMessage: (params: {
       sessionId: string;
       content: string;

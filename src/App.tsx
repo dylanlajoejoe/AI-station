@@ -21,6 +21,12 @@ type ContextMenuState = {
   node: FileTreeViewNode;
 } | null;
 
+type FilePreviewState = {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  content: string;
+  message: string;
+};
+
 const fileContextMenuItems = ['添加到对话', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 const directoryContextMenuItems = ['添加到对话', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 
@@ -90,6 +96,11 @@ export function App() {
   const [isAiConfigOpen, setIsAiConfigOpen] = useState(false);
   const [folderPanelWidth, setFolderPanelWidth] = useState(260);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const [filePreview, setFilePreview] = useState<FilePreviewState>({
+    status: 'idle',
+    content: '',
+    message: '选择左侧文本文件后，这里会显示文件内容。'
+  });
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
 
@@ -148,6 +159,7 @@ export function App() {
       setCurrentDirectory(result.path);
       setSelectedNode(null);
       setSelectedFiles([]);
+      setFilePreview({ status: 'idle', content: '', message: '选择左侧文本文件后，这里会显示文件内容。' });
       setFileTreeError(null);
 
       try {
@@ -160,8 +172,26 @@ export function App() {
     }
   };
 
-  const handleNodeClick = (node: FileTreeNode) => {
+  const handleNodeClick = async (node: FileTreeNode) => {
     setSelectedNode(node);
+
+    if (node.type === 'directory') {
+      setFilePreview({ status: 'idle', content: '', message: '当前选择的是文件夹，暂不显示文件夹内容。' });
+      return;
+    }
+
+    setFilePreview({ status: 'loading', content: '', message: '正在读取文件内容...' });
+
+    try {
+      const result = await window.aiWorkspace.readTextPreview(node.path);
+      setFilePreview({ status: 'ready', content: result.content, message: '' });
+    } catch (error) {
+      setFilePreview({
+        status: 'error',
+        content: '',
+        message: error instanceof Error ? error.message : '文件内容读取失败'
+      });
+    }
   };
 
   const handleNodeContextMenu = (event: ReactMouseEvent, node: FileTreeViewNode) => {
@@ -191,6 +221,7 @@ export function App() {
 
   const handleToggleDirectory = async (node: FileTreeViewNode) => {
     setSelectedNode(node);
+    setFilePreview({ status: 'idle', content: '', message: '当前选择的是文件夹，暂不显示文件夹内容。' });
 
     if (node.type !== 'directory') {
       return;
@@ -306,7 +337,7 @@ export function App() {
             isSelected ? 'active' : '',
             isFileSelected ? 'selected' : ''
           ].filter(Boolean).join(' ')}
-          onClick={() => isDirectory ? void handleToggleDirectory(node) : handleNodeClick(node)}
+          onClick={() => isDirectory ? void handleToggleDirectory(node) : void handleNodeClick(node)}
           onContextMenu={(event) => handleNodeContextMenu(event, node)}
           style={{ paddingLeft: 10 + level * 18 }}
           title={node.path}
@@ -382,7 +413,7 @@ export function App() {
           <div className="current-directory" title={currentDirectory ?? ''}>
             当前目录：{currentDirectory ?? '请选择一个本地目录'}
           </div>
-          <div className="soft-note">当前仅浏览目录结构，不读取文件正文。</div>
+          <div className="soft-note">当前支持文本类文件只读预览，不会自动发送给 AI。</div>
           <nav className="folder-list">
             {fileTreeError && <div className="folder-empty">{fileTreeError}</div>}
             {!fileTreeError && fileTree.length === 0 && (
@@ -422,7 +453,7 @@ export function App() {
           <div className="preview-card">
             <div className="preview-toolbar">
               <span className="status-text">只读预览</span>
-              <span>当前只读取目录结构和文件信息，不读取文件内容</span>
+              <span>支持 txt、md、csv、json、代码文件等文本内容</span>
             </div>
             <article className="file-preview">
               <h2>{selectedNode?.name ?? '目录预览占位'}</h2>
@@ -432,9 +463,16 @@ export function App() {
                   <p>类型：{selectedNode.type === 'directory' ? '文件夹' : '文件'}</p>
                   <p>大小：{formatFileSize(selectedNode.size)}</p>
                   <p>修改时间：{formatModifiedAt(selectedNode.modifiedAt)}</p>
+                  {filePreview.status === 'ready' ? (
+                    <pre className="text-preview-content">{filePreview.content}</pre>
+                  ) : (
+                    <div className={filePreview.status === 'error' ? 'preview-message error' : 'preview-message'}>
+                      {filePreview.message}
+                    </div>
+                  )}
                 </>
               ) : (
-                <p>选择目录后，点击左侧文件或文件夹，这里会显示名称、路径、大小和修改时间。</p>
+                <p>选择目录后，点击左侧文本文件，这里会显示名称、路径、大小、修改时间和文件内容。</p>
               )}
             </article>
           </div>
@@ -532,7 +570,7 @@ export function App() {
 
       <footer className="status-bar">
         <span>只读模式</span>
-        <span>当前只读取目录结构和文件信息</span>
+        <span>文本文件支持只读预览</span>
         <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
       </footer>
       {renderContextMenu()}

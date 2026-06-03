@@ -1,9 +1,27 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import Database from 'better-sqlite3';
-import { readdir, stat } from 'fs/promises';
+import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
 
 const isDev = !app.isPackaged;
+const maxPreviewFileSize = 1024 * 1024;
+const previewableTextExtensions = new Set([
+  '.txt',
+  '.md',
+  '.csv',
+  '.json',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.css',
+  '.html',
+  '.htm',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.log'
+]);
 
 type ChatMessageInput = {
   role: 'user' | 'assistant';
@@ -230,6 +248,28 @@ ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
 
     return left.name.localeCompare(right.name, 'zh-CN');
   });
+});
+
+ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
+  const fileStat = await stat(filePath);
+
+  if (!fileStat.isFile()) {
+    throw new Error('当前选择的不是文件');
+  }
+
+  if (fileStat.size > maxPreviewFileSize) {
+    throw new Error('文件超过 1MB，暂不直接预览');
+  }
+
+  const extension = path.extname(filePath).toLowerCase();
+
+  if (!previewableTextExtensions.has(extension)) {
+    throw new Error('该文件类型暂不支持内容预览');
+  }
+
+  return {
+    content: await readFile(filePath, 'utf8')
+  };
 });
 
 ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => {
