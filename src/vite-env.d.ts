@@ -78,7 +78,6 @@ interface Window {
     locatePaths: (params: {
       workspacePath: string | null;
       content: string;
-      allowSensitivePaths: boolean;
     }) => Promise<LocatedPathResult[]>;
     sendMessage: (params: {
       sessionId: string;
@@ -87,7 +86,6 @@ interface Window {
       workspacePath: string | null;
       locatedPaths: LocatedPathResult[];
       referencedFiles: ReferencedFileInput[];
-      allowSensitivePaths: boolean;
     }) => Promise<{
       userMessage: ChatMessageRecord;
       assistantMessage: ChatMessageRecord;

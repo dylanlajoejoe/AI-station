@@ -30,7 +30,6 @@ type SendMessageParams = {
   workspacePath: string | null;
   locatedPaths: LocatedPathResult[];
   referencedFiles: ReferencedFileInput[];
-  allowSensitivePaths: boolean;
 };
 
 type ReferencedFileInput = {
@@ -100,7 +99,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
   readTextPreview: (filePath: string) => ipcRenderer.invoke('file:readTextPreview', filePath) as Promise<TextPreviewResult>,
-  locatePaths: (params: { workspacePath: string | null; content: string; allowSensitivePaths: boolean }) => ipcRenderer.invoke('file:locatePaths', params) as Promise<LocatedPathResult[]>,
+  locatePaths: (params: { workspacePath: string | null; content: string }) => ipcRenderer.invoke('file:locatePaths', params) as Promise<LocatedPathResult[]>,
   sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>,
   createSession: (params: { workspacePath: string | null }) => ipcRenderer.invoke('session:create', params) as Promise<SessionRecord>,
   listSessions: () => ipcRenderer.invoke('session:list') as Promise<SessionRecord[]>,

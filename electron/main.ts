@@ -35,7 +35,6 @@ type SendMessageParams = {
   workspacePath: string | null;
   locatedPaths: LocatedPathResult[];
   referencedFiles: ReferencedFileInput[];
-  allowSensitivePaths: boolean;
 };
 
 type ReferencedFileInput = {
@@ -208,49 +207,14 @@ function extractPathCandidates(content: string) {
   return Array.from(candidates).filter(Boolean).slice(0, 20);
 }
 
-async function locatePathsInWorkspace(
-  workspacePath: string | null,
-  content: string,
-  allowSensitivePaths: boolean
-): Promise<LocatedPathResult[]> {
-  if (!workspacePath) {
-    return [];
-  }
+async function locatePathsInWorkspace(workspacePath: string | null, content: string): Promise<LocatedPathResult[]> {
 
   const candidates = extractPathCandidates(content);
   const results: LocatedPathResult[] = [];
 
   for (const candidate of candidates) {
-    const targetPath = path.isAbsolute(candidate) ? candidate : path.join(workspacePath, candidate);
+    const targetPath = path.isAbsolute(candidate) ? candidate : path.join(workspacePath ?? process.cwd(), candidate);
     const resolvedPath = path.resolve(targetPath);
-
-    if (!isInsideWorkspace(workspacePath, resolvedPath)) {
-      results.push({
-        input: candidate,
-        status: 'outside_workspace',
-        path: null,
-        name: null,
-        type: null,
-        size: null,
-        modifiedAt: null,
-        message: '路径超出当前工作区，已拒绝定位'
-      });
-      continue;
-    }
-
-    if (!allowSensitivePaths && hasFilteredPathSegment(workspacePath, resolvedPath)) {
-      results.push({
-        input: candidate,
-        status: 'filtered',
-        path: null,
-        name: null,
-        type: null,
-        size: null,
-        modifiedAt: null,
-        message: '路径包含隐藏或敏感条目，已拒绝定位'
-      });
-      continue;
-    }
 
     try {
       const targetStat = await stat(resolvedPath);
@@ -303,45 +267,12 @@ function formatLocatedPaths(results: LocatedPathResult[]) {
 
 async function readReferencedFiles(
   workspacePath: string | null,
-  referencedFiles: ReferencedFileInput[],
-  allowSensitivePaths: boolean
+  referencedFiles: ReferencedFileInput[]
 ): Promise<ReferencedFileContent[]> {
-  if (!workspacePath) {
-    return referencedFiles.map((file) => ({
-      name: file.name,
-      path: file.path,
-      status: 'skipped',
-      content: null,
-      message: '未选择工作区，无法读取引用文件'
-    }));
-  }
-
   const results: ReferencedFileContent[] = [];
 
   for (const file of referencedFiles.slice(0, 10)) {
-    const resolvedPath = path.resolve(file.path);
-
-    if (!isInsideWorkspace(workspacePath, resolvedPath)) {
-      results.push({
-        name: file.name,
-        path: file.path,
-        status: 'skipped',
-        content: null,
-        message: '引用文件超出当前工作区，已拒绝读取'
-      });
-      continue;
-    }
-
-    if (!allowSensitivePaths && hasFilteredPathSegment(workspacePath, resolvedPath)) {
-      results.push({
-        name: file.name,
-        path: file.path,
-        status: 'skipped',
-        content: null,
-        message: '引用文件包含隐藏或敏感路径，已拒绝读取'
-      });
-      continue;
-    }
+    const resolvedPath = path.resolve(path.isAbsolute(file.path) ? file.path : path.join(workspacePath ?? process.cwd(), file.path));
 
     try {
       const fileStat = await stat(resolvedPath);
@@ -703,8 +634,8 @@ ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
   };
 });
 
-ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: string | null; content: string; allowSensitivePaths: boolean }) => {
-  return locatePathsInWorkspace(params.workspacePath, params.content, params.allowSensitivePaths);
+ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: string | null; content: string }) => {
+  return locatePathsInWorkspace(params.workspacePath, params.content);
 });
 
 ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Promise<SendMessageResult> => {
@@ -720,7 +651,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     ? formatWorkspaceTree(workspaceTree.entries, workspaceTree.wasTruncated)
     : '用户尚未选择工作区目录。';
   const locatedPathsText = formatLocatedPaths(params.locatedPaths);
-  const referencedFiles = await readReferencedFiles(params.workspacePath, params.referencedFiles, params.allowSensitivePaths);
+  const referencedFiles = await readReferencedFiles(params.workspacePath, params.referencedFiles);
   const referencedFilesText = formatReferencedFiles(referencedFiles);
   const userMessage = {
     id: createId('message'),
@@ -754,7 +685,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '用户显式引用的文件内容会由系统读取后提供给你。',
               '你只能使用系统提供的引用文件内容，不能假装读取未提供内容的文件。',
               '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
-              '不要建议扫描全盘，不要访问隐藏文件或敏感文件。',
+              '当前阶段文件访问已全量放开。你可以基于系统真实定位结果和引用文件内容回答。',
               '',
               `当前工作区路径：${params.workspacePath ?? '未选择'}`,
               '用户消息路径定位结果：',

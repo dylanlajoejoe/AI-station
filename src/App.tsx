@@ -29,8 +29,6 @@ type FilePreviewState = {
 
 const fileContextMenuItems = ['添加到对话', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 const directoryContextMenuItems = ['添加到对话', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
-const sensitiveFileNames = new Set(['.env', '.env.local', '.env.development', '.env.production', 'credentials.json', 'secrets.json', 'id_rsa', 'id_ed25519']);
-const sensitiveDirectoryNames = new Set(['.git', 'node_modules', 'dist', 'dist-electron', 'build', 'out', '.vite']);
 
 function formatFileSize(size: number | null) {
   if (size === null) {
@@ -82,45 +80,6 @@ function formatReferencedFileSummary(results: ReferencedFileContent[]) {
   const lines = results.map((result) => `${result.status === 'read' ? '已读取' : '未读取'}：${result.name}（${result.message}）`);
 
   return `\n\n引用文件读取结果：\n${lines.join('\n')}`;
-}
-
-function normalizePathCandidate(candidate: string) {
-  return candidate.trim().replace(/^["'“”‘’]+|["'“”‘’，。；;）)]+$/g, '');
-}
-
-function extractPathCandidates(content: string) {
-  const candidates = new Set<string>();
-  const quotedPattern = /["'“‘]([^"'”’]+)["'”’]/g;
-  const pathLikePattern = /(?:[A-Za-z]:)?[^\s"'“”‘’<>|]+[\\/][^\s"'“”‘’<>|]+/g;
-
-  for (const match of content.matchAll(quotedPattern)) {
-    const candidate = normalizePathCandidate(match[1]);
-
-    if (candidate.includes('/') || candidate.includes('\\')) {
-      candidates.add(candidate);
-    }
-  }
-
-  for (const match of content.matchAll(pathLikePattern)) {
-    candidates.add(normalizePathCandidate(match[0]));
-  }
-
-  return Array.from(candidates).filter(Boolean).slice(0, 20);
-}
-
-function hasSensitivePathSegment(pathValue: string) {
-  return pathValue.split(/[\\/]+/).some((segment) => {
-    const lowerSegment = segment.toLowerCase();
-
-    return segment.startsWith('.') || sensitiveFileNames.has(lowerSegment) || sensitiveDirectoryNames.has(segment);
-  });
-}
-
-function getSensitivePathInputs(content: string, files: FileTreeNode[]) {
-  const pathInputs = extractPathCandidates(content).filter(hasSensitivePathSegment);
-  const referencedInputs = files.filter((file) => hasSensitivePathSegment(file.path)).map((file) => file.path);
-
-  return Array.from(new Set([...pathInputs, ...referencedInputs]));
 }
 
 function updateTreeNode(
@@ -349,27 +308,9 @@ export function App() {
     setIsSending(true);
 
     try {
-      const sensitivePathInputs = getSensitivePathInputs(content, selectedFiles);
-      const allowSensitivePaths = sensitivePathInputs.length > 0
-        ? window.confirm(`以下路径包含隐藏或敏感目录/文件，是否允许本次定位或读取？\n\n${sensitivePathInputs.join('\n')}`)
-        : false;
-
-      if (sensitivePathInputs.length > 0 && !allowSensitivePaths) {
-        setMessages((currentMessages) => [
-          ...currentMessages,
-          {
-            id: `assistant-sensitive-denied-${createdAt}`,
-            role: 'assistant',
-            content: '已取消读取隐藏或敏感路径。'
-          }
-        ]);
-        return;
-      }
-
       const locatedPaths = await window.aiWorkspace.locatePaths({
         workspacePath: currentDirectory,
-        content,
-        allowSensitivePaths
+        content
       });
       const session = currentSession ?? await window.aiWorkspace.createSession({
         workspacePath: currentDirectory
@@ -386,8 +327,7 @@ export function App() {
           name: file.name,
           path: file.path,
           type: file.type
-        })),
-        allowSensitivePaths
+        }))
       });
 
       setMessages((currentMessages) => [
@@ -503,7 +443,7 @@ export function App() {
 
       <section
         className="workspace-grid"
-        style={{ gridTemplateColumns: `${folderPanelWidth}px 6px minmax(420px, 1fr) 390px` }}
+        style={{ gridTemplateColumns: `${folderPanelWidth}px 6px minmax(360px, 1fr) minmax(300px, 390px)` }}
       >
         <aside className="folder-panel">
           <div className="folder-header">
@@ -625,7 +565,7 @@ export function App() {
             </div>
           )}
           <div className="context-box">
-            <p>当前引用文件</p>
+            <p>引用文件</p>
             {selectedFiles.length > 0 ? (
               <div className="selected-file-list">
                 {selectedFiles.map((file) => (
@@ -660,14 +600,15 @@ export function App() {
             {isSending && <div className="message ai-message">AI 正在回复...</div>}
           </div>
           <div className="chat-input-row">
-            <input
+            <textarea
               onChange={(event) => setChatInput(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
                   void handleSendMessage();
                 }
               }}
-              placeholder="输入问题，或右键文件添加到对话"
+              placeholder="输入问题，Enter 发送，Shift+Enter 换行"
               value={chatInput}
             />
             <button disabled={isSending} onClick={() => void handleSendMessage()}>{isSending ? '发送中' : '发送'}</button>
