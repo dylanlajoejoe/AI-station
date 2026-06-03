@@ -56,6 +56,22 @@ function formatModifiedAt(value: string | null) {
   });
 }
 
+function formatLocatedPathSummary(results: LocatedPathResult[]) {
+  if (results.length === 0) {
+    return '';
+  }
+
+  const lines = results.map((result) => {
+    if (result.status === 'found') {
+      return `已定位：${result.input} -> ${result.path}`;
+    }
+
+    return `${result.input}：${result.message}`;
+  });
+
+  return `\n\n路径定位结果：\n${lines.join('\n')}`;
+}
+
 function updateTreeNode(
   nodes: FileTreeViewNode[],
   nodeId: string,
@@ -282,6 +298,10 @@ export function App() {
     setIsSending(true);
 
     try {
+      const locatedPaths = await window.aiWorkspace.locatePaths({
+        workspacePath: currentDirectory,
+        content
+      });
       const session = currentSession ?? await window.aiWorkspace.createSession({
         workspacePath: currentDirectory
       });
@@ -290,12 +310,17 @@ export function App() {
       const result = await window.aiWorkspace.sendMessage({
         sessionId: session.id,
         content,
-        history
+        history,
+        workspacePath: currentDirectory,
+        locatedPaths
       });
 
       setMessages((currentMessages) => [
         ...currentMessages.filter((message) => message.id !== userMessage.id),
-        result.userMessage,
+        {
+          ...result.userMessage,
+          content: `${result.userMessage.content}${formatLocatedPathSummary(result.locatedPaths)}`
+        },
         result.assistantMessage
       ]);
       void window.aiWorkspace.listSessions().then(setSessions);
@@ -413,7 +438,7 @@ export function App() {
           <div className="current-directory" title={currentDirectory ?? ''}>
             当前目录：{currentDirectory ?? '请选择一个本地目录'}
           </div>
-          <div className="soft-note">当前支持文本类文件只读预览，不会自动发送给 AI。</div>
+          <div className="soft-note">AI 可定位你输入的工作区内路径，但不会默认读取文件内容。</div>
           <nav className="folder-list">
             {fileTreeError && <div className="folder-empty">{fileTreeError}</div>}
             {!fileTreeError && fileTree.length === 0 && (
@@ -529,9 +554,18 @@ export function App() {
             {selectedFiles.length > 0 ? (
               <div className="selected-file-list">
                 {selectedFiles.map((file) => (
-                  <button key={file.id} onClick={() => handleRemoveReferenceFile(file)} title="点击移除引用">
-                    {file.name}
-                  </button>
+                  <span className="selected-file-chip" key={file.id} title={file.path}>
+                    <span className="selected-file-name">{file.name}</span>
+                    <button
+                      aria-label={`移除引用 ${file.name}`}
+                      className="remove-reference-button"
+                      onClick={() => handleRemoveReferenceFile(file)}
+                      title="移除引用"
+                      type="button"
+                    >
+                      ×
+                    </button>
+                  </span>
                 ))}
               </div>
             ) : (
@@ -540,7 +574,7 @@ export function App() {
           </div>
           <div className="message-list">
             {messages.length === 0 && (
-              <div className="message-empty">输入问题后开始对话。当前不会自动读取文件内容。</div>
+              <div className="message-empty">输入问题后开始对话。输入工作区内路径时，系统会先真实定位文件。</div>
             )}
             {messages.map((message) => (
               <div
@@ -570,7 +604,7 @@ export function App() {
 
       <footer className="status-bar">
         <span>只读模式</span>
-        <span>文本文件支持只读预览</span>
+        <span>AI 可定位当前工作区内路径</span>
         <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
       </footer>
       {renderContextMenu()}

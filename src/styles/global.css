@@ -551,6 +551,8 @@ h1 {
 }
 
 .context-box {
+  overflow: hidden;
+  max-height: 150px;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -572,19 +574,59 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  overflow: auto;
+  max-height: 82px;
   margin-top: 10px;
+  padding-right: 2px;
 }
 
-.selected-file-list button {
+.selected-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 100%;
-  border: 0;
   border-radius: 999px;
   padding: 7px 10px;
   background: #eef5f2;
   color: var(--green);
-  cursor: pointer;
   font-size: 13px;
   font-weight: 700;
+}
+
+.selected-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove-reference-button {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-right: -3px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(47, 52, 55, 0.12);
+  color: var(--green);
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1;
+  opacity: 0;
+  transform: scale(0.86);
+  transition: opacity 0.14s ease, transform 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.selected-file-chip:hover .remove-reference-button,
+.remove-reference-button:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.remove-reference-button:hover {
+  background: var(--green);
+  color: white;
 }
 
 .message-list {

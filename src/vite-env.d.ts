@@ -41,6 +41,17 @@ type AiConfigInput = {
   timeoutMs: number;
 };
 
+type LocatedPathResult = {
+  input: string;
+  status: 'found' | 'not_found' | 'outside_workspace' | 'filtered';
+  path: string | null;
+  name: string | null;
+  type: 'file' | 'directory' | null;
+  size: number | null;
+  modifiedAt: string | null;
+  message: string;
+};
+
 interface Window {
   aiWorkspace: {
     platform: NodeJS.Platform;
@@ -50,13 +61,20 @@ interface Window {
     }>;
     listFileTree: (directoryPath: string) => Promise<FileTreeNode[]>;
     readTextPreview: (filePath: string) => Promise<TextPreviewResult>;
+    locatePaths: (params: {
+      workspacePath: string | null;
+      content: string;
+    }) => Promise<LocatedPathResult[]>;
     sendMessage: (params: {
       sessionId: string;
       content: string;
       history: ChatMessageInput[];
+      workspacePath: string | null;
+      locatedPaths: LocatedPathResult[];
     }) => Promise<{
       userMessage: ChatMessageRecord;
       assistantMessage: ChatMessageRecord;
+      locatedPaths: LocatedPathResult[];
     }>;
     createSession: (params: {
       workspacePath: string | null;

@@ -32,6 +32,33 @@ type SendMessageParams = {
   sessionId: string;
   content: string;
   history: ChatMessageInput[];
+  workspacePath: string | null;
+  locatedPaths: LocatedPathResult[];
+};
+
+type WorkspaceTreeEntry = {
+  depth: number;
+  name: string;
+  type: 'file' | 'directory';
+  size: number | null;
+  modifiedAt: string | null;
+};
+
+type LocatedPathResult = {
+  input: string;
+  status: 'found' | 'not_found' | 'outside_workspace' | 'filtered';
+  path: string | null;
+  name: string | null;
+  type: 'file' | 'directory' | null;
+  size: number | null;
+  modifiedAt: string | null;
+  message: string;
+};
+
+type SendMessageResult = {
+  userMessage: ReturnType<typeof mapMessage>;
+  assistantMessage: ReturnType<typeof mapMessage>;
+  locatedPaths: LocatedPathResult[];
 };
 
 type SessionRow = {
@@ -56,6 +83,28 @@ type AiConfig = {
   model: string;
   timeoutMs: number;
 };
+
+const maxWorkspaceTreeEntries = 300;
+const maxWorkspaceTreeDepth = 3;
+const sensitiveFileNames = new Set([
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  'credentials.json',
+  'secrets.json',
+  'id_rsa',
+  'id_ed25519'
+]);
+const ignoredDirectoryNames = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'dist-electron',
+  'build',
+  'out',
+  '.vite'
+]);
 
 let aiConfig: Partial<AiConfig> = {
   baseUrl: process.env.AI_BASE_URL,
@@ -88,6 +137,242 @@ function mapMessage(row: MessageRow) {
 
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function shouldHideEntry(name: string, isDirectory: boolean) {
+  if (name.startsWith('.')) {
+    return true;
+  }
+
+  if (sensitiveFileNames.has(name.toLowerCase())) {
+    return true;
+  }
+
+  return isDirectory && ignoredDirectoryNames.has(name);
+}
+
+function isInsideWorkspace(workspacePath: string, targetPath: string) {
+  const relativePath = path.relative(path.resolve(workspacePath), path.resolve(targetPath));
+
+  return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+}
+
+function hasFilteredPathSegment(workspacePath: string, targetPath: string) {
+  const relativePath = path.relative(path.resolve(workspacePath), path.resolve(targetPath));
+  const segments = relativePath.split(path.sep).filter(Boolean);
+
+  return segments.some((segment, index) => {
+    const isDirectory = index < segments.length - 1;
+    return shouldHideEntry(segment, isDirectory);
+  });
+}
+
+function normalizePathCandidate(candidate: string) {
+  return candidate.trim().replace(/^["'“”‘’]+|["'“”‘’，。；;）)]+$/g, '');
+}
+
+function extractPathCandidates(content: string) {
+  const candidates = new Set<string>();
+  const quotedPattern = /["'“‘]([^"'”’]+)["'”’]/g;
+  const pathLikePattern = /(?:[A-Za-z]:)?[^\s"'“”‘’<>|]+[\\/][^\s"'“”‘’<>|]+/g;
+
+  for (const match of content.matchAll(quotedPattern)) {
+    const candidate = normalizePathCandidate(match[1]);
+
+    if (candidate.includes('/') || candidate.includes('\\')) {
+      candidates.add(candidate);
+    }
+  }
+
+  for (const match of content.matchAll(pathLikePattern)) {
+    candidates.add(normalizePathCandidate(match[0]));
+  }
+
+  return Array.from(candidates).filter(Boolean).slice(0, 20);
+}
+
+async function locatePathsInWorkspace(workspacePath: string | null, content: string): Promise<LocatedPathResult[]> {
+  if (!workspacePath) {
+    return [];
+  }
+
+  const candidates = extractPathCandidates(content);
+  const results: LocatedPathResult[] = [];
+
+  for (const candidate of candidates) {
+    const targetPath = path.isAbsolute(candidate) ? candidate : path.join(workspacePath, candidate);
+    const resolvedPath = path.resolve(targetPath);
+
+    if (!isInsideWorkspace(workspacePath, resolvedPath)) {
+      results.push({
+        input: candidate,
+        status: 'outside_workspace',
+        path: null,
+        name: null,
+        type: null,
+        size: null,
+        modifiedAt: null,
+        message: '路径超出当前工作区，已拒绝定位'
+      });
+      continue;
+    }
+
+    if (hasFilteredPathSegment(workspacePath, resolvedPath)) {
+      results.push({
+        input: candidate,
+        status: 'filtered',
+        path: null,
+        name: null,
+        type: null,
+        size: null,
+        modifiedAt: null,
+        message: '路径包含隐藏或敏感条目，已拒绝定位'
+      });
+      continue;
+    }
+
+    try {
+      const targetStat = await stat(resolvedPath);
+      const isDirectory = targetStat.isDirectory();
+
+      results.push({
+        input: candidate,
+        status: 'found',
+        path: resolvedPath,
+        name: path.basename(resolvedPath),
+        type: isDirectory ? 'directory' : 'file',
+        size: targetStat.isFile() ? targetStat.size : null,
+        modifiedAt: targetStat.mtime.toISOString(),
+        message: '已在当前工作区定位到该路径'
+      });
+    } catch {
+      results.push({
+        input: candidate,
+        status: 'not_found',
+        path: resolvedPath,
+        name: path.basename(resolvedPath),
+        type: null,
+        size: null,
+        modifiedAt: null,
+        message: '当前工作区内未找到该路径'
+      });
+    }
+  }
+
+  return results;
+}
+
+function formatLocatedPaths(results: LocatedPathResult[]) {
+  if (results.length === 0) {
+    return '用户消息中未识别到可定位的文件路径。';
+  }
+
+  return results.map((result) => {
+    if (result.status !== 'found') {
+      return `- ${result.input}: ${result.message}`;
+    }
+
+    const kind = result.type === 'directory' ? '文件夹' : '文件';
+    const size = result.size === null ? '-' : `${result.size} bytes`;
+    const modifiedAt = result.modifiedAt ?? '-';
+
+    return `- ${result.input}: 已定位 ${kind} ${result.path} (size: ${size}, modified: ${modifiedAt})`;
+  }).join('\n');
+}
+
+function formatWorkspaceTree(entries: WorkspaceTreeEntry[], wasTruncated: boolean) {
+  if (entries.length === 0) {
+    return '当前工作区目录结构为空，或所有条目均被安全规则过滤。';
+  }
+
+  const lines = entries.map((entry) => {
+    const indent = '  '.repeat(entry.depth);
+    const kind = entry.type === 'directory' ? '文件夹' : '文件';
+    const size = entry.size === null ? '-' : `${entry.size} bytes`;
+    const modifiedAt = entry.modifiedAt ?? '-';
+
+    return `${indent}- ${entry.name} (${kind}, size: ${size}, modified: ${modifiedAt})`;
+  });
+
+  if (wasTruncated) {
+    lines.push(`- 已达到 ${maxWorkspaceTreeEntries} 项上限，后续目录结构已省略。`);
+  }
+
+  return lines.join('\n');
+}
+
+async function collectWorkspaceTree(rootPath: string) {
+  const entries: WorkspaceTreeEntry[] = [];
+  let wasTruncated = false;
+
+  async function walk(directoryPath: string, depth: number) {
+    if (entries.length >= maxWorkspaceTreeEntries) {
+      wasTruncated = true;
+      return;
+    }
+
+    if (depth > maxWorkspaceTreeDepth) {
+      return;
+    }
+
+    let directoryEntries;
+
+    try {
+      directoryEntries = await readdir(directoryPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    const visibleEntries = directoryEntries
+      .filter((entry) => !shouldHideEntry(entry.name, entry.isDirectory()))
+      .sort((left, right) => {
+        if (left.isDirectory() !== right.isDirectory()) {
+          return left.isDirectory() ? -1 : 1;
+        }
+
+        return left.name.localeCompare(right.name, 'zh-CN');
+      });
+
+    for (const entry of visibleEntries) {
+      if (entries.length >= maxWorkspaceTreeEntries) {
+        wasTruncated = true;
+        return;
+      }
+
+      const entryPath = path.join(directoryPath, entry.name);
+      const isDirectory = entry.isDirectory();
+
+      try {
+        const entryStat = await stat(entryPath);
+        entries.push({
+          depth,
+          name: entry.name,
+          type: isDirectory ? 'directory' : 'file',
+          size: entry.isFile() ? entryStat.size : null,
+          modifiedAt: entryStat.mtime.toISOString()
+        });
+      } catch {
+        entries.push({
+          depth,
+          name: entry.name,
+          type: isDirectory ? 'directory' : 'file',
+          size: null,
+          modifiedAt: null
+        });
+      }
+
+      if (isDirectory) {
+        await walk(entryPath, depth + 1);
+      }
+    }
+  }
+
+  await walk(rootPath, 0);
+
+  return {
+    entries,
+    wasTruncated
+  };
 }
 
 function initDatabase() {
@@ -213,7 +498,7 @@ ipcMain.handle('session:get', async (_event, params: { sessionId: string }) => {
 ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
   const entries = await readdir(directoryPath, { withFileTypes: true });
   const nodes = await Promise.all(
-    entries.map(async (entry) => {
+    entries.filter((entry) => !shouldHideEntry(entry.name, entry.isDirectory())).map(async (entry) => {
       const entryPath = path.join(directoryPath, entry.name);
       const entryType = entry.isDirectory() ? 'directory' : 'file';
 
@@ -272,7 +557,11 @@ ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
   };
 });
 
-ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => {
+ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: string | null; content: string }) => {
+  return locatePathsInWorkspace(params.workspacePath, params.content);
+});
+
+ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Promise<SendMessageResult> => {
   const baseUrl = String(getRequiredConfig('baseUrl', 'AI Base URL')).replace(/\/$/, '');
   const apiKey = String(getRequiredConfig('apiKey', 'AI API Key'));
   const model = String(getRequiredConfig('model', 'AI Model'));
@@ -280,6 +569,11 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const now = new Date().toISOString();
+  const workspaceTree = params.workspacePath ? await collectWorkspaceTree(params.workspacePath) : null;
+  const workspaceTreeText = workspaceTree
+    ? formatWorkspaceTree(workspaceTree.entries, workspaceTree.wasTruncated)
+    : '用户尚未选择工作区目录。';
+  const locatedPathsText = formatLocatedPaths(params.locatedPaths);
   const userMessage = {
     id: createId('message'),
     session_id: params.sessionId,
@@ -305,7 +599,21 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => 
         messages: [
           {
             role: 'system',
-            content: '你是一个桌面 AI 助手。用户可能会在消息中提到本地文件名或文件夹名，但你不能读取本地文件内容。请只根据用户输入的文字回答。如果需要文件内容，请提醒用户把内容粘贴到对话中。'
+            content: [
+              '你是一个桌面 AI 助手。',
+              '你可以看到用户已选择工作区的目录结构摘要，包括文件名、文件夹名、大小和修改时间。',
+              '如果用户消息里包含路径，系统会先在当前工作区内真实定位路径，并把定位结果提供给你。',
+              '你不能默认读取任何文件内容，不能假装已经看过文件内容。',
+              '如果需要文件内容，请明确要求用户引用文件或粘贴内容。',
+              '不要建议扫描全盘，不要访问隐藏文件或敏感文件。',
+              '',
+              `当前工作区路径：${params.workspacePath ?? '未选择'}`,
+              '用户消息路径定位结果：',
+              locatedPathsText,
+              '',
+              '当前工作区目录结构摘要：',
+              workspaceTreeText
+            ].join('\n')
           },
           ...params.history.slice(-20),
           {
@@ -354,7 +662,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams) => 
 
     return {
       userMessage: mapMessage(userMessage),
-      assistantMessage: mapMessage(assistantMessage)
+      assistantMessage: mapMessage(assistantMessage),
+      locatedPaths: params.locatedPaths
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {

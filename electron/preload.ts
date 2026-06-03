@@ -27,11 +27,25 @@ type SendMessageParams = {
   sessionId: string;
   content: string;
   history: ChatMessageInput[];
+  workspacePath: string | null;
+  locatedPaths: LocatedPathResult[];
+};
+
+type LocatedPathResult = {
+  input: string;
+  status: 'found' | 'not_found' | 'outside_workspace' | 'filtered';
+  path: string | null;
+  name: string | null;
+  type: 'file' | 'directory' | null;
+  size: number | null;
+  modifiedAt: string | null;
+  message: string;
 };
 
 type SendMessageResult = {
   userMessage: ChatMessageRecord;
   assistantMessage: ChatMessageRecord;
+  locatedPaths: LocatedPathResult[];
 };
 
 type SessionRecord = {
@@ -69,6 +83,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
   readTextPreview: (filePath: string) => ipcRenderer.invoke('file:readTextPreview', filePath) as Promise<TextPreviewResult>,
+  locatePaths: (params: { workspacePath: string | null; content: string }) => ipcRenderer.invoke('file:locatePaths', params) as Promise<LocatedPathResult[]>,
   sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>,
   createSession: (params: { workspacePath: string | null }) => ipcRenderer.invoke('session:create', params) as Promise<SessionRecord>,
   listSessions: () => ipcRenderer.invoke('session:list') as Promise<SessionRecord[]>,
