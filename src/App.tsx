@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 
 type ChatMessage = {
@@ -122,6 +122,7 @@ export function App() {
   const [isAiConfigOpen, setIsAiConfigOpen] = useState(false);
   const [folderPanelWidth, setFolderPanelWidth] = useState(260);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreviewState>({
     status: 'idle',
     content: '',
@@ -151,6 +152,14 @@ export function App() {
       window.removeEventListener('resize', closeContextMenu);
     };
   }, []);
+
+  useEffect(() => {
+    const messageList = messageListRef.current;
+
+    if (messageList) {
+      messageList.scrollTop = messageList.scrollHeight;
+    }
+  }, [messages, isSending]);
 
   const handleOpenSession = async (sessionId: string) => {
     const detail = await window.aiWorkspace.getSession({ sessionId });
@@ -564,28 +573,7 @@ export function App() {
               </div>
             </div>
           )}
-          <div className="context-box">
-            <p>引用文件</p>
-            {selectedFiles.length > 0 ? (
-              <div className="selected-file-list">
-                {selectedFiles.map((file) => (
-                  <span className="selected-file-chip" key={file.id} title={file.path}>
-                    <span className="selected-file-name">{file.name}</span>
-                    <button
-                      aria-label={`移除引用 ${file.name}`}
-                      className="remove-reference-button"
-                      onClick={() => handleRemoveReferenceFile(file)}
-                      title="移除引用"
-                      type="button"
-                    />
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <span>暂未选择文件</span>
-            )}
-          </div>
-          <div className="message-list">
+          <div className="message-list" ref={messageListRef}>
             {messages.length === 0 && (
               <div className="message-empty">输入问题后开始对话。输入工作区内路径时，系统会先真实定位文件。</div>
             )}
@@ -600,17 +588,35 @@ export function App() {
             {isSending && <div className="message ai-message">AI 正在回复...</div>}
           </div>
           <div className="chat-input-row">
-            <textarea
-              onChange={(event) => setChatInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void handleSendMessage();
-                }
-              }}
-              placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-              value={chatInput}
-            />
+            <div className={selectedFiles.length > 0 ? 'chat-input-stack has-references' : 'chat-input-stack'}>
+              {selectedFiles.length > 0 && (
+                <div className="selected-file-list">
+                  {selectedFiles.map((file) => (
+                    <span className="selected-file-chip" key={file.id} title={file.path}>
+                      <span className="selected-file-name">{file.name}</span>
+                      <button
+                        aria-label={`移除引用 ${file.name}`}
+                        className="remove-reference-button"
+                        onClick={() => handleRemoveReferenceFile(file)}
+                        title="移除引用"
+                        type="button"
+                      />
+                    </span>
+                  ))}
+                </div>
+              )}
+              <textarea
+                onChange={(event) => setChatInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void handleSendMessage();
+                  }
+                }}
+                placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+                value={chatInput}
+              />
+            </div>
             <button disabled={isSending} onClick={() => void handleSendMessage()}>{isSending ? '发送中' : '发送'}</button>
           </div>
         </aside>

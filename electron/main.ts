@@ -357,6 +357,35 @@ function formatReferencedFiles(files: ReferencedFileContent[]) {
   }).join('\n\n');
 }
 
+function mergeReferencedFilesWithLocatedPaths(
+  referencedFiles: ReferencedFileInput[],
+  locatedPaths: LocatedPathResult[]
+) {
+  const mergedFiles = new Map<string, ReferencedFileInput>();
+
+  for (const file of referencedFiles) {
+    mergedFiles.set(path.resolve(file.path), file);
+  }
+
+  for (const locatedPath of locatedPaths) {
+    if (locatedPath.status !== 'found' || locatedPath.type !== 'file' || !locatedPath.path) {
+      continue;
+    }
+
+    const resolvedPath = path.resolve(locatedPath.path);
+
+    if (!mergedFiles.has(resolvedPath)) {
+      mergedFiles.set(resolvedPath, {
+        name: locatedPath.name ?? path.basename(resolvedPath),
+        path: resolvedPath,
+        type: 'file'
+      });
+    }
+  }
+
+  return Array.from(mergedFiles.values());
+}
+
 function formatWorkspaceTree(entries: WorkspaceTreeEntry[], wasTruncated: boolean) {
   if (entries.length === 0) {
     return '当前工作区目录结构为空，或所有条目均被安全规则过滤。';
@@ -651,7 +680,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     ? formatWorkspaceTree(workspaceTree.entries, workspaceTree.wasTruncated)
     : '用户尚未选择工作区目录。';
   const locatedPathsText = formatLocatedPaths(params.locatedPaths);
-  const referencedFiles = await readReferencedFiles(params.workspacePath, params.referencedFiles);
+  const filesToRead = mergeReferencedFilesWithLocatedPaths(params.referencedFiles, params.locatedPaths);
+  const referencedFiles = await readReferencedFiles(params.workspacePath, filesToRead);
   const referencedFilesText = formatReferencedFiles(referencedFiles);
   const userMessage = {
     id: createId('message'),
@@ -681,9 +711,9 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
             content: [
               '你是一个桌面 AI 助手。',
               '你可以看到用户已选择工作区的目录结构摘要，包括文件名、文件夹名、大小和修改时间。',
-              '如果用户消息里包含路径，系统会先在当前工作区内真实定位路径，并把定位结果提供给你。',
-              '用户显式引用的文件内容会由系统读取后提供给你。',
-              '你只能使用系统提供的引用文件内容，不能假装读取未提供内容的文件。',
+              '如果用户消息里包含路径，系统会真实定位路径；定位到的文本文件会自动读取内容并提供给你。',
+              '用户显式引用的文件内容也会由系统读取后提供给你。',
+              '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件。',
               '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
               '当前阶段文件访问已全量放开。你可以基于系统真实定位结果和引用文件内容回答。',
               '',
