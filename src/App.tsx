@@ -21,6 +21,14 @@ type ContextMenuState = {
   node: FileTreeViewNode;
 } | null;
 
+type SessionContextMenuState = {
+  x: number;
+  y: number;
+  session: SessionRecord;
+} | null;
+
+type TopMenuKey = 'file' | 'edit';
+
 type FilePreviewState = {
   status: 'idle' | 'loading' | 'ready' | 'error';
   content: string;
@@ -103,12 +111,36 @@ function updateTreeNode(
   });
 }
 
+function filterTreeNodes(nodes: FileTreeViewNode[], keyword: string): FileTreeViewNode[] {
+  const normalizedKeyword = keyword.trim().toLowerCase();
+
+  if (!normalizedKeyword) {
+    return nodes;
+  }
+
+  return nodes.flatMap((node) => {
+    const filteredChildren = node.children ? filterTreeNodes(node.children, normalizedKeyword) : [];
+    const isMatched = node.name.toLowerCase().includes(normalizedKeyword);
+
+    if (!isMatched && filteredChildren.length === 0) {
+      return [];
+    }
+
+    return [{
+      ...node,
+      children: filteredChildren.length > 0 ? filteredChildren : node.children,
+      isExpanded: filteredChildren.length > 0 ? true : node.isExpanded
+    }];
+  });
+}
+
 export function App() {
   const [currentDirectory, setCurrentDirectory] = useState<string | null>(null);
   const [fileTree, setFileTree] = useState<FileTreeViewNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<FileTreeNode | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<FileTreeNode[]>([]);
   const [fileTreeError, setFileTreeError] = useState<string | null>(null);
+  const [fileSearchKeyword, setFileSearchKeyword] = useState('');
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
@@ -122,6 +154,8 @@ export function App() {
   const [isAiConfigOpen, setIsAiConfigOpen] = useState(false);
   const [folderPanelWidth, setFolderPanelWidth] = useState(260);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
+  const [openTopMenu, setOpenTopMenu] = useState<TopMenuKey | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreviewState>({
     status: 'idle',
@@ -130,6 +164,7 @@ export function App() {
   });
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
+  const visibleFileTree = filterTreeNodes(fileTree, fileSearchKeyword);
 
   useEffect(() => {
     void window.aiWorkspace.getAiConfig().then((config) => {
@@ -142,7 +177,21 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const closeContextMenu = () => setContextMenu(null);
+    const offMessageChunk = window.aiWorkspace.onMessageChunk((chunk) => {
+      setMessages((currentMessages) => currentMessages.map((message) => message.id === `assistant-stream-${chunk.sessionId}`
+        ? { ...message, content: `${message.content}${chunk.content}` }
+        : message));
+    });
+
+    return offMessageChunk;
+  }, []);
+
+  useEffect(() => {
+    const closeContextMenu = () => {
+      setContextMenu(null);
+      setSessionContextMenu(null);
+      setOpenTopMenu(null);
+    };
 
     window.addEventListener('click', closeContextMenu);
     window.addEventListener('resize', closeContextMenu);
@@ -166,6 +215,84 @@ export function App() {
     setCurrentSession(detail.session);
     setCurrentDirectory(detail.session.workspacePath);
     setMessages(detail.messages);
+  };
+
+  const refreshSessions = async () => {
+    const nextSessions = await window.aiWorkspace.listSessions();
+    setSessions(nextSessions);
+  };
+
+  const handleSessionContextMenu = (event: ReactMouseEvent, session: SessionRecord) => {
+    event.preventDefault();
+    setSessionContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      session
+    });
+  };
+
+  const handleRenameSession = async (session: SessionRecord) => {
+    const title = window.prompt('请输入新的会话名称', session.title);
+
+    if (!title || title.trim() === session.title) {
+      setSessionContextMenu(null);
+      return;
+    }
+
+    await window.aiWorkspace.renameSession({ sessionId: session.id, title });
+    if (currentSession?.id === session.id) {
+      setCurrentSession({ ...session, title: title.trim() });
+    }
+    await refreshSessions();
+    setSessionContextMenu(null);
+  };
+
+  const handleDeleteSession = async (session: SessionRecord) => {
+    if (!window.confirm(`确定删除会话“${session.title}”吗？`)) {
+      setSessionContextMenu(null);
+      return;
+    }
+
+    await window.aiWorkspace.deleteSession({ sessionId: session.id });
+    if (currentSession?.id === session.id) {
+      setCurrentSession(null);
+      setMessages([]);
+    }
+    await refreshSessions();
+    setSessionContextMenu(null);
+  };
+
+  const handleExportSession = async (session: SessionRecord) => {
+    await window.aiWorkspace.exportSessionMarkdown({ sessionId: session.id });
+    setSessionContextMenu(null);
+  };
+
+  const handleNewSession = () => {
+    setCurrentSession(null);
+    setMessages([]);
+    setSelectedFiles([]);
+    setOpenTopMenu(null);
+  };
+
+  const handleExportCurrentSession = async () => {
+    if (!currentSession) {
+      window.alert('当前没有可导出的会话');
+      setOpenTopMenu(null);
+      return;
+    }
+
+    await window.aiWorkspace.exportSessionMarkdown({ sessionId: currentSession.id });
+    setOpenTopMenu(null);
+  };
+
+  const handleClearChatInput = () => {
+    setChatInput('');
+    setOpenTopMenu(null);
+  };
+
+  const handleClearReferencedFiles = () => {
+    setSelectedFiles([]);
+    setOpenTopMenu(null);
   };
 
   const handleResizeFolderPanel = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -255,9 +382,6 @@ export function App() {
   };
 
   const handleToggleDirectory = async (node: FileTreeViewNode) => {
-    setSelectedNode(node);
-    setFilePreview({ status: 'idle', content: '', message: '当前选择的是文件夹，暂不显示文件夹内容。' });
-
     if (node.type !== 'directory') {
       return;
     }
@@ -325,6 +449,16 @@ export function App() {
         workspacePath: currentDirectory
       });
       setCurrentSession(session);
+      const streamingMessageId = `assistant-stream-${session.id}`;
+
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: streamingMessageId,
+          role: 'assistant',
+          content: ''
+        }
+      ]);
 
       const result = await window.aiWorkspace.sendMessage({
         sessionId: session.id,
@@ -340,7 +474,7 @@ export function App() {
       });
 
       setMessages((currentMessages) => [
-        ...currentMessages.filter((message) => message.id !== userMessage.id),
+        ...currentMessages.filter((message) => message.id !== userMessage.id && message.id !== streamingMessageId),
         {
           ...result.userMessage,
           content: `${result.userMessage.content}${formatLocatedPathSummary(result.locatedPaths)}${formatReferencedFileSummary(result.referencedFiles)}`
@@ -371,6 +505,7 @@ export function App() {
     });
     setAiConfigStatus('已保存配置');
     setAiApiKey('');
+    setIsAiConfigOpen(false);
   };
 
   const renderFileTreeNodes = (nodes: FileTreeViewNode[], level = 0) => nodes.map((node) => {
@@ -433,16 +568,64 @@ export function App() {
     );
   };
 
+  const renderSessionContextMenu = () => {
+    if (!sessionContextMenu) {
+      return null;
+    }
+
+    return (
+      <div
+        className="context-menu"
+        onClick={(event) => event.stopPropagation()}
+        style={{ left: sessionContextMenu.x, top: sessionContextMenu.y }}
+      >
+        <button className="context-menu-item primary" onClick={() => void handleOpenSession(sessionContextMenu.session.id)}>打开会话</button>
+        <button className="context-menu-item primary" onClick={() => void handleRenameSession(sessionContextMenu.session)}>重命名会话</button>
+        <button className="context-menu-item primary" onClick={() => void handleExportSession(sessionContextMenu.session)}>导出为 Markdown</button>
+        <button className="context-menu-item danger" onClick={() => void handleDeleteSession(sessionContextMenu.session)}>删除会话</button>
+      </div>
+    );
+  };
+
+  const toggleTopMenu = (event: ReactMouseEvent, menu: TopMenuKey) => {
+    event.stopPropagation();
+    setOpenTopMenu((currentMenu) => currentMenu === menu ? null : menu);
+  };
+
   return (
     <main className="workspace-shell">
       <header className="top-bar">
-        <div>
-          <p className="product-name">轻量级 AI 工作区连接器</p>
+        <div className="top-identity">
+          <div className="title-row">
+            <nav className="app-menu" aria-label="应用菜单">
+              <div className="app-menu-group">
+                <button onClick={(event) => toggleTopMenu(event, 'file')} type="button">文件</button>
+                {openTopMenu === 'file' && (
+                  <div className="top-menu-popover" onClick={(event) => event.stopPropagation()}>
+                    <button onClick={() => void handleExportCurrentSession()} type="button">导出当前会话</button>
+                  </div>
+                )}
+              </div>
+              <div className="app-menu-group">
+                <button onClick={(event) => toggleTopMenu(event, 'edit')} type="button">编辑</button>
+                {openTopMenu === 'edit' && (
+                  <div className="top-menu-popover" onClick={(event) => event.stopPropagation()}>
+                    <button onClick={handleClearChatInput} type="button">清空输入框</button>
+                    <button onClick={handleClearReferencedFiles} type="button">清空引用文件</button>
+                  </div>
+                )}
+              </div>
+            </nav>
+          </div>
           <div className="breadcrumb">{currentDirectory ?? '尚未选择本地目录'}</div>
         </div>
         <div className="top-actions">
-          <input className="search-input" placeholder="搜索当前目录" />
-          <button className="ghost-button">列表视图</button>
+          <input
+            className="search-input"
+            onChange={(event) => setFileSearchKeyword(event.target.value)}
+            placeholder="搜索当前目录的文件"
+            value={fileSearchKeyword}
+          />
           <button className="ghost-button" onClick={() => setIsAiConfigOpen((isOpen) => !isOpen)}>
             AI 配置：{aiConfigStatus}
           </button>
@@ -468,7 +651,10 @@ export function App() {
             {!fileTreeError && fileTree.length === 0 && (
               <div className="folder-empty">点击上方“选择目录”，这里会显示文件树。</div>
             )}
-            {renderFileTreeNodes(fileTree)}
+            {!fileTreeError && fileTree.length > 0 && visibleFileTree.length === 0 && (
+              <div className="folder-empty">没有匹配的文件或文件夹。</div>
+            )}
+            {renderFileTreeNodes(visibleFileTree)}
           </nav>
           <div className="session-list-box">
             <div className="panel-title">历史会话</div>
@@ -478,6 +664,7 @@ export function App() {
                 className={currentSession?.id === session.id ? 'session-item active' : 'session-item'}
                 key={session.id}
                 onClick={() => void handleOpenSession(session.id)}
+                onContextMenu={(event) => handleSessionContextMenu(event, session)}
               >
                 <span>{session.title}</span>
                 <small>{new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small>
@@ -505,23 +692,16 @@ export function App() {
               <span>支持 txt、md、csv、json、代码文件等文本内容</span>
             </div>
             <article className="file-preview">
-              <h2>{selectedNode?.name ?? '目录预览占位'}</h2>
               {selectedNode ? (
-                <>
-                  <p title={selectedNode.path}>路径：{selectedNode.path}</p>
-                  <p>类型：{selectedNode.type === 'directory' ? '文件夹' : '文件'}</p>
-                  <p>大小：{formatFileSize(selectedNode.size)}</p>
-                  <p>修改时间：{formatModifiedAt(selectedNode.modifiedAt)}</p>
-                  {filePreview.status === 'ready' ? (
-                    <pre className="text-preview-content">{filePreview.content}</pre>
-                  ) : (
-                    <div className={filePreview.status === 'error' ? 'preview-message error' : 'preview-message'}>
-                      {filePreview.message}
-                    </div>
-                  )}
-                </>
+                filePreview.status === 'ready' ? (
+                  <pre className="text-preview-content">{filePreview.content}</pre>
+                ) : (
+                  <div className={filePreview.status === 'error' ? 'preview-message error' : 'preview-message'}>
+                    {filePreview.message}
+                  </div>
+                )
               ) : (
-                <p>选择目录后，点击左侧文本文件，这里会显示名称、路径、大小、修改时间和文件内容。</p>
+                <div className="preview-message">选择目录后，点击左侧文本文件，这里会显示文件内容。</div>
               )}
             </article>
           </div>
@@ -588,7 +768,7 @@ export function App() {
             {isSending && <div className="message ai-message">AI 正在回复...</div>}
           </div>
           <div className="chat-input-row">
-            <div className={selectedFiles.length > 0 ? 'chat-input-stack has-references' : 'chat-input-stack'}>
+            <div className="chat-input-area">
               {selectedFiles.length > 0 && (
                 <div className="selected-file-list">
                   {selectedFiles.map((file) => (
@@ -605,19 +785,26 @@ export function App() {
                   ))}
                 </div>
               )}
-              <textarea
-                onChange={(event) => setChatInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault();
-                    void handleSendMessage();
-                  }
-                }}
-                placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-                value={chatInput}
-              />
+              <div className="chat-input-stack">
+                <textarea
+                  onChange={(event) => setChatInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      void handleSendMessage();
+                    }
+                  }}
+                  placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+                  value={chatInput}
+                />
+                <div className="chat-inline-actions">
+                  <button className="mini-action-button" onClick={handleNewSession} type="button">新会话</button>
+                  <button className="mini-send-button" disabled={isSending || !chatInput.trim()} onClick={() => void handleSendMessage()} type="button">
+                    {isSending ? '发送中' : '发送'}
+                  </button>
+                </div>
+              </div>
             </div>
-            <button disabled={isSending} onClick={() => void handleSendMessage()}>{isSending ? '发送中' : '发送'}</button>
           </div>
         </aside>
       </section>
@@ -628,6 +815,7 @@ export function App() {
         <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
       </footer>
       {renderContextMenu()}
+      {renderSessionContextMenu()}
     </main>
   );
 }

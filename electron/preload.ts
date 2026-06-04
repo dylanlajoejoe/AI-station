@@ -64,6 +64,11 @@ type SendMessageResult = {
   referencedFiles: ReferencedFileContent[];
 };
 
+type MessageChunk = {
+  sessionId: string;
+  content: string;
+};
+
 type SessionRecord = {
   id: string;
   title: string;
@@ -101,9 +106,19 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   readTextPreview: (filePath: string) => ipcRenderer.invoke('file:readTextPreview', filePath) as Promise<TextPreviewResult>,
   locatePaths: (params: { workspacePath: string | null; content: string }) => ipcRenderer.invoke('file:locatePaths', params) as Promise<LocatedPathResult[]>,
   sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>,
+  onMessageChunk: (callback: (chunk: MessageChunk) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, chunk: MessageChunk) => callback(chunk);
+
+    ipcRenderer.on('chat:messageChunk', listener);
+
+    return () => ipcRenderer.removeListener('chat:messageChunk', listener);
+  },
   createSession: (params: { workspacePath: string | null }) => ipcRenderer.invoke('session:create', params) as Promise<SessionRecord>,
   listSessions: () => ipcRenderer.invoke('session:list') as Promise<SessionRecord[]>,
   getSession: (params: { sessionId: string }) => ipcRenderer.invoke('session:get', params) as Promise<{ session: SessionRecord; messages: ChatMessageRecord[] }>,
+  renameSession: (params: { sessionId: string; title: string }) => ipcRenderer.invoke('session:rename', params) as Promise<{ ok: boolean }>,
+  deleteSession: (params: { sessionId: string }) => ipcRenderer.invoke('session:delete', params) as Promise<{ ok: boolean }>,
+  exportSessionMarkdown: (params: { sessionId: string }) => ipcRenderer.invoke('session:exportMarkdown', params) as Promise<{ ok: boolean; path: string | null }>,
   getAiConfig: () => ipcRenderer.invoke('config:getAiConfig') as Promise<AiConfigView>,
   setAiConfig: (config: AiConfigInput) => ipcRenderer.invoke('config:setAiConfig', config) as Promise<{ ok: boolean }>
 });

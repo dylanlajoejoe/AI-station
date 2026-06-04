@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron';
 import Database from 'better-sqlite3';
-import { readFile, readdir, stat } from 'fs/promises';
+import { readFile, readdir, stat, writeFile } from 'fs/promises';
 import path from 'path';
 
 const isDev = !app.isPackaged;
@@ -75,6 +75,14 @@ type SendMessageResult = {
   assistantMessage: ReturnType<typeof mapMessage>;
   locatedPaths: LocatedPathResult[];
   referencedFiles: ReferencedFileContent[];
+};
+
+type ChatCompletionChunk = {
+  choices?: Array<{
+    delta?: {
+      content?: string;
+    };
+  }>;
 };
 
 type SessionRow = {
@@ -357,6 +365,16 @@ function formatReferencedFiles(files: ReferencedFileContent[]) {
   }).join('\n\n');
 }
 
+function formatReferencedFileNames(files: ReferencedFileContent[]) {
+  const readableFiles = files.filter((file) => file.status === 'read');
+
+  if (readableFiles.length === 0) {
+    return '';
+  }
+
+  return readableFiles.map((file) => `- ${file.name}: ${file.path}`).join('\n');
+}
+
 function mergeReferencedFilesWithLocatedPaths(
   referencedFiles: ReferencedFileInput[],
   locatedPaths: LocatedPathResult[]
@@ -513,6 +531,53 @@ function getRequiredConfig<K extends keyof AiConfig>(key: K, label: string) {
   return value;
 }
 
+async function readStreamingChatResponse(response: Response, onChunk: (content: string) => void) {
+  if (!response.body) {
+    throw new Error('AI 接口未返回流式内容');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullContent = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+
+      if (!trimmedLine.startsWith('data:')) {
+        continue;
+      }
+
+      const data = trimmedLine.slice(5).trim();
+
+      if (!data || data === '[DONE]') {
+        continue;
+      }
+
+      const parsed = JSON.parse(data) as ChatCompletionChunk;
+      const content = parsed.choices?.[0]?.delta?.content;
+
+      if (content) {
+        fullContent += content;
+        onChunk(content);
+      }
+    }
+  }
+
+  return fullContent.trim();
+}
+
 ipcMain.handle('config:getAiConfig', async () => ({
   baseUrl: aiConfig.baseUrl ?? '',
   model: aiConfig.model ?? '',
@@ -601,6 +666,76 @@ ipcMain.handle('session:get', async (_event, params: { sessionId: string }) => {
   };
 });
 
+ipcMain.handle('session:rename', async (_event, params: { sessionId: string; title: string }) => {
+  const title = params.title.trim();
+
+  if (!title) {
+    throw new Error('会话标题不能为空');
+  }
+
+  db.prepare('UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?').run(
+    title,
+    new Date().toISOString(),
+    params.sessionId
+  );
+
+  return { ok: true };
+});
+
+ipcMain.handle('session:delete', async (_event, params: { sessionId: string }) => {
+  db.prepare('DELETE FROM messages WHERE session_id = ?').run(params.sessionId);
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(params.sessionId);
+
+  return { ok: true };
+});
+
+ipcMain.handle('session:exportMarkdown', async (_event, params: { sessionId: string }) => {
+  const session = db.prepare(`
+    SELECT id, title, workspace_path, created_at, updated_at
+    FROM sessions
+    WHERE id = ?
+  `).get(params.sessionId) as SessionRow | undefined;
+
+  if (!session) {
+    throw new Error('会话不存在');
+  }
+
+  const messages = db.prepare(`
+    SELECT id, session_id, role, content, created_at
+    FROM messages
+    WHERE session_id = ?
+    ORDER BY created_at ASC
+  `).all(params.sessionId) as MessageRow[];
+  const safeTitle = session.title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 80) || '会话导出';
+  const result = await dialog.showSaveDialog({
+    defaultPath: `${safeTitle}.md`,
+    filters: [{ name: 'Markdown', extensions: ['md'] }]
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { ok: false, path: null };
+  }
+
+  const markdown = [
+    `# ${session.title}`,
+    '',
+    `- 创建时间：${session.created_at}`,
+    `- 更新时间：${session.updated_at}`,
+    `- 初始目录：${session.workspace_path ?? '未记录'}`,
+    '',
+    ...messages.flatMap((message) => [
+      `## ${message.role === 'user' ? '用户' : 'AI'} · ${message.created_at}`,
+      '',
+      message.content,
+      ''
+    ])
+  ].join('\n');
+
+  await writeFile(result.filePath, markdown, 'utf8');
+
+  return { ok: true, path: result.filePath };
+});
+
 ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
   const entries = await readdir(directoryPath, { withFileTypes: true });
   const nodes = await Promise.all(
@@ -683,6 +818,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
   const filesToRead = mergeReferencedFilesWithLocatedPaths(params.referencedFiles, params.locatedPaths);
   const referencedFiles = await readReferencedFiles(params.workspacePath, filesToRead);
   const referencedFilesText = formatReferencedFiles(referencedFiles);
+  const referencedFileNamesText = formatReferencedFileNames(referencedFiles);
   const userMessage = {
     id: createId('message'),
     session_id: params.sessionId,
@@ -705,6 +841,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       },
       body: JSON.stringify({
         model,
+        stream: true,
         messages: [
           {
             role: 'system',
@@ -731,7 +868,9 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
           ...params.history.slice(-20),
           {
             role: 'user',
-            content: params.content
+            content: referencedFileNamesText
+              ? `${params.content}\n\n本轮用户引用并已读取的文件：\n${referencedFileNamesText}\n\n请优先基于这些文件回答用户问题。`
+              : params.content
           }
         ]
       }),
@@ -742,14 +881,12 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       throw new Error(`AI 接口请求失败：${response.status}`);
     }
 
-    const data = await response.json() as {
-      choices?: Array<{
-        message?: {
-          content?: string;
-        };
-      }>;
-    };
-    const content = data.choices?.[0]?.message?.content?.trim();
+    const content = await readStreamingChatResponse(response, (chunk) => {
+      _event.sender.send('chat:messageChunk', {
+        sessionId: params.sessionId,
+        content: chunk
+      });
+    });
 
     if (!content) {
       throw new Error('AI 返回内容为空');
@@ -814,6 +951,7 @@ function createMainWindow() {
 
 void app.whenReady().then(() => {
   initDatabase();
+  Menu.setApplicationMenu(null);
   createMainWindow();
 
   app.on('activate', () => {

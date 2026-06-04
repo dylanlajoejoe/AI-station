@@ -66,6 +66,11 @@ type ReferencedFileContent = {
   message: string;
 };
 
+type MessageChunk = {
+  sessionId: string;
+  content: string;
+};
+
 interface Window {
   aiWorkspace: {
     platform: NodeJS.Platform;
@@ -92,6 +97,7 @@ interface Window {
       locatedPaths: LocatedPathResult[];
       referencedFiles: ReferencedFileContent[];
     }>;
+    onMessageChunk: (callback: (chunk: MessageChunk) => void) => () => void;
     createSession: (params: {
       workspacePath: string | null;
     }) => Promise<SessionRecord>;
@@ -101,6 +107,23 @@ interface Window {
     }) => Promise<{
       session: SessionRecord;
       messages: ChatMessageRecord[];
+    }>;
+    renameSession: (params: {
+      sessionId: string;
+      title: string;
+    }) => Promise<{
+      ok: boolean;
+    }>;
+    deleteSession: (params: {
+      sessionId: string;
+    }) => Promise<{
+      ok: boolean;
+    }>;
+    exportSessionMarkdown: (params: {
+      sessionId: string;
+    }) => Promise<{
+      ok: boolean;
+      path: string | null;
     }>;
     getAiConfig: () => Promise<{
       baseUrl: string;
