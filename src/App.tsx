@@ -42,6 +42,10 @@ type FilePreviewState = {
 type FilePreviewTab = {
   node: FileTreeNode;
   preview: FilePreviewState;
+  draftContent: string;
+  isDirty: boolean;
+  isSaving: boolean;
+  saveMessage: string;
 };
 
 const fileContextMenuItems = ['添加到对话', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
@@ -407,7 +411,11 @@ export function App() {
         ...currentTabs,
         {
           node,
-          preview: { status: 'loading', content: '', message: '正在读取文件内容...' }
+          preview: { status: 'loading', content: '', message: '正在读取文件内容...' },
+          draftContent: '',
+          isDirty: false,
+          isSaving: false,
+          saveMessage: ''
         }
       ];
     });
@@ -415,7 +423,12 @@ export function App() {
     try {
       const result = await window.aiWorkspace.readTextPreview(node.path);
       setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === node.id
-        ? { ...tab, preview: { status: 'ready', content: result.content, message: '' } }
+        ? {
+          ...tab,
+          preview: { status: 'ready', content: result.content, message: '' },
+          draftContent: tab.isDirty ? tab.draftContent : result.content,
+          saveMessage: ''
+        }
         : tab));
     } catch (error) {
       setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === node.id
@@ -436,7 +449,66 @@ export function App() {
     setSelectedNode(tab.node);
   };
 
+  const handlePreviewDraftChange = (nodeId: string, content: string) => {
+    setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === nodeId
+      ? {
+        ...tab,
+        draftContent: content,
+        isDirty: content !== tab.preview.content,
+        saveMessage: content !== tab.preview.content ? '未保存' : ''
+      }
+      : tab));
+  };
+
+  const handleSavePreviewTab = async (tab: FilePreviewTab) => {
+    setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+      ? { ...currentTab, isSaving: true, saveMessage: '保存中...' }
+      : currentTab));
+
+    try {
+      const result = await window.aiWorkspace.saveTextFile({
+        filePath: tab.node.path,
+        content: tab.draftContent
+      });
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+        ? {
+          ...currentTab,
+          node: {
+            ...currentTab.node,
+            size: result.size,
+            modifiedAt: result.modifiedAt
+          },
+          preview: {
+            status: 'ready',
+            content: currentTab.draftContent,
+            message: ''
+          },
+          isDirty: false,
+          isSaving: false,
+          saveMessage: '已保存'
+        }
+        : currentTab));
+      setSelectedNode((currentNode) => currentNode?.id === tab.node.id
+        ? { ...currentNode, size: result.size, modifiedAt: result.modifiedAt }
+        : currentNode);
+    } catch (error) {
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+        ? {
+          ...currentTab,
+          isSaving: false,
+          saveMessage: error instanceof Error ? error.message : '保存失败'
+        }
+        : currentTab));
+    }
+  };
+
   const handleClosePreviewTab = (nodeId: string) => {
+    const tab = openPreviewTabs.find((previewTab) => previewTab.node.id === nodeId);
+
+    if (tab?.isDirty && !window.confirm(`文件“${tab.node.name}”尚未保存，确定关闭吗？`)) {
+      return;
+    }
+
     setOpenPreviewTabs((currentTabs) => {
       const tabIndex = currentTabs.findIndex((tab) => tab.node.id === nodeId);
       const nextTabs = currentTabs.filter((tab) => tab.node.id !== nodeId);
@@ -785,7 +857,7 @@ export function App() {
                   title={tab.node.path}
                   type="button"
                 >
-                  <span className="preview-tab-name">{tab.node.name}</span>
+                  <span className="preview-tab-name">{tab.isDirty ? `* ${tab.node.name}` : tab.node.name}</span>
                   <span
                     aria-label={`关闭 ${tab.node.name}`}
                     className="preview-tab-close"
@@ -813,17 +885,36 @@ export function App() {
 
           <div className="preview-card">
             <div className="preview-toolbar">
-              <span className="status-text">{activePreviewTab ? '只读预览' : '等待打开文件'}</span>
+              <span className="status-text">{activePreviewTab ? '文本编辑' : '等待打开文件'}</span>
               <span>
                 {activePreviewTab
                   ? `${activePreviewTab.node.name} · 修改于 ${formatModifiedAt(activePreviewTab.node.modifiedAt)}`
                   : '点击左侧文件后，会在上方生成可关闭标签。'}
               </span>
+              {activePreviewTab && (
+                <div className="preview-edit-actions">
+                  <span className={activePreviewTab.isDirty ? 'save-state dirty' : 'save-state'}>
+                    {activePreviewTab.saveMessage || (activePreviewTab.isDirty ? '未保存' : '已同步')}
+                  </span>
+                  <button
+                    disabled={!activePreviewTab.isDirty || activePreviewTab.isSaving || activePreviewTab.preview.status !== 'ready'}
+                    onClick={() => void handleSavePreviewTab(activePreviewTab)}
+                    type="button"
+                  >
+                    {activePreviewTab.isSaving ? '保存中' : '保存'}
+                  </button>
+                </div>
+              )}
             </div>
             <article className="file-preview">
               {activePreviewTab ? (
                 activePreviewTab.preview.status === 'ready' ? (
-                  <pre className="text-preview-content">{activePreviewTab.preview.content}</pre>
+                  <textarea
+                    className="text-preview-editor"
+                    onChange={(event) => handlePreviewDraftChange(activePreviewTab.node.id, event.target.value)}
+                    spellCheck={false}
+                    value={activePreviewTab.draftContent}
+                  />
                 ) : (
                   <div className={activePreviewTab.preview.status === 'error' ? 'preview-message error' : 'preview-message'}>
                     {activePreviewTab.preview.message}
@@ -952,7 +1043,7 @@ export function App() {
       </section>
 
       <footer className="status-bar">
-        <span>只读模式</span>
+        <span>文本文件可编辑</span>
         <span>AI 可定位当前工作区内路径</span>
         <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
       </footer>

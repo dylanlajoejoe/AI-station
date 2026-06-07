@@ -854,6 +854,32 @@ ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
   };
 });
 
+ipcMain.handle('file:saveText', async (_event, params: { filePath: string; content: string }) => {
+  const fileStat = await stat(params.filePath);
+
+  if (!fileStat.isFile()) {
+    throw new Error('当前选择的不是文件');
+  }
+
+  const extension = path.extname(params.filePath).toLowerCase();
+
+  if (!previewableTextExtensions.has(extension)) {
+    throw new Error('该文件类型暂不支持编辑保存');
+  }
+
+  if (Buffer.byteLength(params.content, 'utf8') > maxPreviewFileSize) {
+    throw new Error('文件内容超过 1MB，已拒绝保存');
+  }
+
+  await writeFile(params.filePath, params.content, 'utf8');
+  const nextStat = await stat(params.filePath);
+
+  return {
+    size: nextStat.size,
+    modifiedAt: nextStat.mtime.toISOString()
+  };
+});
+
 ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: string | null; content: string }) => {
   return locatePathsInWorkspace(params.workspacePath, params.content);
 });

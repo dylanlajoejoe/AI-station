@@ -18,6 +18,11 @@ type TextPreviewResult = {
   content: string;
 };
 
+type SaveTextResult = {
+  size: number;
+  modifiedAt: string;
+};
+
 type SessionRecord = {
   id: string;
   title: string;
@@ -80,6 +85,10 @@ interface Window {
     }>;
     listFileTree: (directoryPath: string) => Promise<FileTreeNode[]>;
     readTextPreview: (filePath: string) => Promise<TextPreviewResult>;
+    saveTextFile: (params: {
+      filePath: string;
+      content: string;
+    }) => Promise<SaveTextResult>;
     locatePaths: (params: {
       workspacePath: string | null;
       content: string;

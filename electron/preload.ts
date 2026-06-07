@@ -18,6 +18,11 @@ type TextPreviewResult = {
   content: string;
 };
 
+type SaveTextResult = {
+  size: number;
+  modifiedAt: string;
+};
+
 type ChatMessageInput = {
   role: 'user' | 'assistant';
   content: string;
@@ -104,6 +109,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
   readTextPreview: (filePath: string) => ipcRenderer.invoke('file:readTextPreview', filePath) as Promise<TextPreviewResult>,
+  saveTextFile: (params: { filePath: string; content: string }) => ipcRenderer.invoke('file:saveText', params) as Promise<SaveTextResult>,
   locatePaths: (params: { workspacePath: string | null; content: string }) => ipcRenderer.invoke('file:locatePaths', params) as Promise<LocatedPathResult[]>,
   sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>,
   onMessageChunk: (callback: (chunk: MessageChunk) => void) => {
