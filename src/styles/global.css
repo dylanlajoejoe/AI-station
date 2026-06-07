@@ -612,12 +612,11 @@ textarea:focus-visible {
 
 .text-preview-content {
   overflow: auto;
-  max-height: 520px;
-  margin: 18px 0 0;
-  padding: 16px;
-  border: 1px solid #dce5e7;
-  border-radius: 14px;
-  background: #fbf7ee;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: #263237;
   font-family: "Cascadia Code", "Consolas", monospace;
   font-size: 13px;
