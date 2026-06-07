@@ -222,6 +222,13 @@ textarea:focus-visible {
   background: rgba(23, 74, 92, 0.18);
 }
 
+.ai-resize-handle {
+  margin-left: -4px;
+  margin-right: -4px;
+  width: 14px;
+  justify-self: center;
+}
+
 .folder-panel,
 .file-panel,
 .ai-panel {
@@ -313,13 +320,15 @@ textarea:focus-visible {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 6px 8px;
   border: 0;
   border-radius: 12px;
   background: transparent;
   color: var(--text);
   text-align: left;
   cursor: pointer;
+  font-size: 13px;
+  line-height: 1.35;
   transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
 }
 
@@ -342,11 +351,11 @@ textarea:focus-visible {
 
 .selected-mark {
   flex: 0 0 auto;
-  padding: 3px 6px;
+  padding: 2px 5px;
   border-radius: 999px;
   background: var(--green);
   color: white;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
 }
 
@@ -424,6 +433,18 @@ textarea:focus-visible {
   gap: 6px;
   margin-top: 16px;
   max-height: 210px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-list-box .panel-title {
+  margin-bottom: 0;
+}
+
+.session-list {
+  display: grid;
+  gap: 6px;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -464,24 +485,82 @@ textarea:focus-visible {
   padding: 18px;
 }
 
-.panel-heading {
+.preview-tabs-bar {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 18px;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin-bottom: 12px;
+  padding: 2px 2px 8px;
+  scrollbar-width: thin;
 }
 
-h1 {
-  margin: 0;
-  color: var(--blue);
-  font-size: 28px;
-}
-
-.panel-heading p,
-.context-box p {
-  margin: 6px 0 0;
+.preview-tabs-empty {
+  padding: 8px 10px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.preview-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  max-width: 220px;
+  min-width: 120px;
+  border: 1px solid var(--line);
+  border-radius: 12px 12px 8px 8px;
+  padding: 8px 8px 7px 10px;
+  background: rgba(255, 253, 248, 0.72);
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.preview-tab:hover {
+  background: #fffdf8;
+}
+
+.preview-tab.active {
+  border-color: #aac6cc;
+  background: #fffdf8;
+  color: var(--blue);
+  box-shadow: inset 0 -2px 0 var(--blue);
+  font-weight: 700;
+}
+
+.preview-tab-name {
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-tab-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.preview-tab-close {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.preview-tab-close:hover,
+.preview-tab-close:focus-visible {
+  background: rgba(159, 47, 47, 0.1);
+  color: #9f2f2f;
+  outline: none;
 }
 
 .preview-card {
@@ -565,13 +644,60 @@ h1 {
 
 .ai-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 14px;
   background: rgba(234, 240, 242, 0.9);
 }
 
-.ai-config-box {
+.ai-session-header {
   grid-row: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fffdf8;
+}
+
+.ai-session-title-box {
+  min-width: 0;
+}
+
+.ai-session-title-box .panel-title {
+  margin-bottom: 4px;
+}
+
+.ai-session-title-box strong {
+  display: block;
+  overflow: hidden;
+  color: var(--blue);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-length-box {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.context-length-box span,
+.context-length-box small {
+  font-size: 11px;
+}
+
+.context-length-box strong {
+  color: var(--green);
+  font-size: 13px;
+}
+
+.ai-config-box {
+  grid-row: 2;
   display: grid;
   gap: 8px;
   padding: 14px;
@@ -710,7 +836,7 @@ h1 {
 }
 
 .message-list {
-  grid-row: 2;
+  grid-row: 3;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -753,7 +879,7 @@ h1 {
 }
 
 .chat-input-row {
-  grid-row: 3;
+  grid-row: 4;
   display: block;
 }
 

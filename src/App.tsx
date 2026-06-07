@@ -35,6 +35,11 @@ type FilePreviewState = {
   message: string;
 };
 
+type FilePreviewTab = {
+  node: FileTreeNode;
+  preview: FilePreviewState;
+};
+
 const fileContextMenuItems = ['添加到对话', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 const directoryContextMenuItems = ['添加到对话', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 
@@ -88,6 +93,18 @@ function formatReferencedFileSummary(results: ReferencedFileContent[]) {
   const lines = results.map((result) => `${result.status === 'read' ? '已读取' : '未读取'}：${result.name}（${result.message}）`);
 
   return `\n\n引用文件读取结果：\n${lines.join('\n')}`;
+}
+
+function formatContextLength(characterCount: number) {
+  if (characterCount < 1000) {
+    return `${characterCount} 字符`;
+  }
+
+  return `${(characterCount / 1000).toFixed(1)}k 字符`;
+}
+
+function estimateTokenCount(characterCount: number) {
+  return Math.ceil(characterCount / 2);
 }
 
 function updateTreeNode(
@@ -153,18 +170,25 @@ export function App() {
   const [aiConfigStatus, setAiConfigStatus] = useState('未配置');
   const [isAiConfigOpen, setIsAiConfigOpen] = useState(false);
   const [folderPanelWidth, setFolderPanelWidth] = useState(260);
+  const [aiPanelWidth, setAiPanelWidth] = useState(390);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [openTopMenu, setOpenTopMenu] = useState<TopMenuKey | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
-  const [filePreview, setFilePreview] = useState<FilePreviewState>({
-    status: 'idle',
-    content: '',
-    message: '选择左侧文本文件后，这里会显示文件内容。'
-  });
+  const [openPreviewTabs, setOpenPreviewTabs] = useState<FilePreviewTab[]>([]);
+  const [activePreviewTabId, setActivePreviewTabId] = useState<string | null>(null);
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
   const visibleFileTree = filterTreeNodes(fileTree, fileSearchKeyword);
+  const activePreviewTab = openPreviewTabs.find((tab) => tab.node.id === activePreviewTabId) ?? null;
+  const sessionTitle = currentSession?.title ?? '新会话';
+  const contextCharacterCount = [
+    currentDirectory ?? '',
+    chatInput,
+    ...messages.map((message) => message.content),
+    ...selectedFiles.map((file) => `${file.name}\n${file.path}`)
+  ].join('\n').length;
+  const estimatedTokenCount = estimateTokenCount(contextCharacterCount);
 
   useEffect(() => {
     void window.aiWorkspace.getAiConfig().then((config) => {
@@ -314,6 +338,25 @@ export function App() {
     window.addEventListener('pointerup', handlePointerUp);
   };
 
+  const handleResizeAiPanel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const startX = event.clientX;
+    const startWidth = aiPanelWidth;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.min(620, Math.max(300, startWidth + startX - moveEvent.clientX));
+      setAiPanelWidth(nextWidth);
+    };
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  };
+
   const handleSelectDirectory = async () => {
     const result = await window.aiWorkspace.selectDirectory();
 
@@ -321,7 +364,8 @@ export function App() {
       setCurrentDirectory(result.path);
       setSelectedNode(null);
       setSelectedFiles([]);
-      setFilePreview({ status: 'idle', content: '', message: '选择左侧文本文件后，这里会显示文件内容。' });
+      setOpenPreviewTabs([]);
+      setActivePreviewTabId(null);
       setFileTreeError(null);
 
       try {
@@ -338,22 +382,61 @@ export function App() {
     setSelectedNode(node);
 
     if (node.type === 'directory') {
-      setFilePreview({ status: 'idle', content: '', message: '当前选择的是文件夹，暂不显示文件夹内容。' });
       return;
     }
 
-    setFilePreview({ status: 'loading', content: '', message: '正在读取文件内容...' });
+    setActivePreviewTabId(node.id);
+    setOpenPreviewTabs((currentTabs) => {
+      if (currentTabs.some((tab) => tab.node.id === node.id)) {
+        return currentTabs;
+      }
+
+      return [
+        ...currentTabs,
+        {
+          node,
+          preview: { status: 'loading', content: '', message: '正在读取文件内容...' }
+        }
+      ];
+    });
 
     try {
       const result = await window.aiWorkspace.readTextPreview(node.path);
-      setFilePreview({ status: 'ready', content: result.content, message: '' });
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === node.id
+        ? { ...tab, preview: { status: 'ready', content: result.content, message: '' } }
+        : tab));
     } catch (error) {
-      setFilePreview({
-        status: 'error',
-        content: '',
-        message: error instanceof Error ? error.message : '文件内容读取失败'
-      });
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === node.id
+        ? {
+          ...tab,
+          preview: {
+            status: 'error',
+            content: '',
+            message: error instanceof Error ? error.message : '文件内容读取失败'
+          }
+        }
+        : tab));
     }
+  };
+
+  const handleActivatePreviewTab = (tab: FilePreviewTab) => {
+    setActivePreviewTabId(tab.node.id);
+    setSelectedNode(tab.node);
+  };
+
+  const handleClosePreviewTab = (nodeId: string) => {
+    setOpenPreviewTabs((currentTabs) => {
+      const tabIndex = currentTabs.findIndex((tab) => tab.node.id === nodeId);
+      const nextTabs = currentTabs.filter((tab) => tab.node.id !== nodeId);
+
+      if (activePreviewTabId === nodeId) {
+        const nextActiveTab = nextTabs[Math.max(0, tabIndex - 1)] ?? nextTabs[0] ?? null;
+        setActivePreviewTabId(nextActiveTab?.node.id ?? null);
+        setSelectedNode(nextActiveTab?.node ?? null);
+      }
+
+      return nextTabs;
+    });
   };
 
   const handleNodeContextMenu = (event: ReactMouseEvent, node: FileTreeViewNode) => {
@@ -617,7 +700,6 @@ export function App() {
               </div>
             </nav>
           </div>
-          <div className="breadcrumb">{currentDirectory ?? '尚未选择本地目录'}</div>
         </div>
         <div className="top-actions">
           <input
@@ -635,7 +717,7 @@ export function App() {
 
       <section
         className="workspace-grid"
-        style={{ gridTemplateColumns: `${folderPanelWidth}px 6px minmax(360px, 1fr) minmax(300px, 390px)` }}
+        style={{ gridTemplateColumns: `${folderPanelWidth}px 6px minmax(300px, 1fr) 6px ${aiPanelWidth}px` }}
       >
         <aside className="folder-panel">
           <div className="folder-header">
@@ -658,56 +740,105 @@ export function App() {
           </nav>
           <div className="session-list-box">
             <div className="panel-title">历史会话</div>
-            {sessions.length === 0 && <div className="folder-empty">暂无历史会话</div>}
-            {sessions.map((session) => (
-              <button
-                className={currentSession?.id === session.id ? 'session-item active' : 'session-item'}
-                key={session.id}
-                onClick={() => void handleOpenSession(session.id)}
-                onContextMenu={(event) => handleSessionContextMenu(event, session)}
-              >
-                <span>{session.title}</span>
-                <small>{new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small>
-              </button>
-            ))}
+            <div className="session-list">
+              {sessions.length === 0 && <div className="folder-empty">暂无历史会话</div>}
+              {sessions.map((session) => (
+                <button
+                  className={currentSession?.id === session.id ? 'session-item active' : 'session-item'}
+                  key={session.id}
+                  onClick={() => void handleOpenSession(session.id)}
+                  onContextMenu={(event) => handleSessionContextMenu(event, session)}
+                >
+                  <span>{session.title}</span>
+                  <small>{new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small>
+                </button>
+              ))}
+            </div>
           </div>
         </aside>
         <div className="resize-handle" onPointerDown={handleResizeFolderPanel} />
 
         <section className="file-panel">
-          <div className="panel-heading">
-            <div>
-              <h1>{selectedNode?.name ?? '未选择文件'}</h1>
-              <p>
-                {selectedNode
-                  ? `${selectedNode.type === 'directory' ? '文件夹' : '文件'} · ${formatFileSize(selectedNode.size)} · 修改于 ${formatModifiedAt(selectedNode.modifiedAt)}`
-                  : '请先从左侧目录中选择一个文件或文件夹'}
-              </p>
-            </div>
+          <div className="preview-tabs-bar" aria-label="已打开文件标签">
+            {openPreviewTabs.length === 0 ? (
+              <div className="preview-tabs-empty">未打开文件</div>
+            ) : openPreviewTabs.map((tab) => {
+              const isActive = tab.node.id === activePreviewTabId;
+
+              return (
+                <button
+                  className={isActive ? 'preview-tab active' : 'preview-tab'}
+                  key={tab.node.id}
+                  onClick={() => handleActivatePreviewTab(tab)}
+                  title={tab.node.path}
+                  type="button"
+                >
+                  <span className="preview-tab-name">{tab.node.name}</span>
+                  <span className="preview-tab-meta">{formatFileSize(tab.node.size)}</span>
+                  <span
+                    aria-label={`关闭 ${tab.node.name}`}
+                    className="preview-tab-close"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleClosePreviewTab(tab.node.id);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    title="关闭"
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        handleClosePreviewTab(tab.node.id);
+                      }
+                    }}
+                  >
+                    x
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           <div className="preview-card">
             <div className="preview-toolbar">
-              <span className="status-text">只读预览</span>
-              <span>支持 txt、md、csv、json、代码文件等文本内容</span>
+              <span className="status-text">{activePreviewTab ? '只读预览' : '等待打开文件'}</span>
+              <span>
+                {activePreviewTab
+                  ? `${activePreviewTab.node.name} · 修改于 ${formatModifiedAt(activePreviewTab.node.modifiedAt)}`
+                  : '点击左侧文件后，会在上方生成可关闭标签。'}
+              </span>
             </div>
             <article className="file-preview">
-              {selectedNode ? (
-                filePreview.status === 'ready' ? (
-                  <pre className="text-preview-content">{filePreview.content}</pre>
+              {activePreviewTab ? (
+                activePreviewTab.preview.status === 'ready' ? (
+                  <pre className="text-preview-content">{activePreviewTab.preview.content}</pre>
                 ) : (
-                  <div className={filePreview.status === 'error' ? 'preview-message error' : 'preview-message'}>
-                    {filePreview.message}
+                  <div className={activePreviewTab.preview.status === 'error' ? 'preview-message error' : 'preview-message'}>
+                    {activePreviewTab.preview.message}
                   </div>
                 )
               ) : (
-                <div className="preview-message">选择目录后，点击左侧文本文件，这里会显示文件内容。</div>
+                <div className="preview-message">选择目录后，点击左侧文本文件，这里会以标签页方式打开文件内容。</div>
               )}
             </article>
           </div>
         </section>
 
+        <div className="resize-handle ai-resize-handle" onPointerDown={handleResizeAiPanel} />
+
         <aside className="ai-panel">
+          <div className="ai-session-header">
+            <div className="ai-session-title-box">
+              <span className="panel-title">当前会话</span>
+              <strong title={sessionTitle}>{sessionTitle}</strong>
+            </div>
+            <div className="context-length-box" title="按当前消息、输入框、目录路径和引用文件名粗略估算，不等同于模型真实 token。">
+              <span>上下文</span>
+              <strong>{formatContextLength(contextCharacterCount)}</strong>
+              <small>约 {estimatedTokenCount.toLocaleString('zh-CN')} tokens</small>
+            </div>
+          </div>
           {isAiConfigOpen && (
             <div className="ai-config-box">
               <div className="ai-config-heading">
