@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
+import remarkGfm from 'remark-gfm';
+import 'highlight.js/styles/github.css';
 
 type ChatMessage = {
   id: string;
@@ -105,6 +109,14 @@ function formatContextLength(characterCount: number) {
 
 function estimateTokenCount(characterCount: number) {
   return Math.ceil(characterCount / 2);
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <ReactMarkdown rehypePlugins={[rehypeHighlight]} remarkPlugins={[remarkGfm]}>
+      {content}
+    </ReactMarkdown>
+  );
 }
 
 function updateTreeNode(
@@ -774,7 +786,6 @@ export function App() {
                   type="button"
                 >
                   <span className="preview-tab-name">{tab.node.name}</span>
-                  <span className="preview-tab-meta">{formatFileSize(tab.node.size)}</span>
                   <span
                     aria-label={`关闭 ${tab.node.name}`}
                     className="preview-tab-close"
@@ -893,7 +904,7 @@ export function App() {
                 className={message.role === 'user' ? 'message user-message' : 'message ai-message'}
                 key={message.id}
               >
-                {message.content}
+                {message.role === 'assistant' ? <MarkdownMessage content={message.content} /> : message.content}
               </div>
             ))}
             {isSending && <div className="message ai-message">AI 正在回复...</div>}
