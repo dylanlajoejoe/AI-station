@@ -763,9 +763,11 @@ h1 {
 }
 
 .chat-input-stack {
-  position: relative;
   overflow: hidden;
+  display: grid;
+  gap: 6px;
   min-width: 0;
+  padding: 8px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fffdf8;
@@ -780,7 +782,7 @@ h1 {
   background: transparent;
   max-height: 72px;
   min-height: 72px;
-  padding: 9px 10px 30px;
+  padding: 6px 4px;
   resize: none;
   overflow: auto;
   font-size: 13px;
@@ -788,23 +790,22 @@ h1 {
 }
 
 .chat-inline-actions {
-  position: absolute;
-  right: 7px;
-  bottom: 6px;
   display: flex;
+  justify-content: flex-end;
   gap: 5px;
 }
 
 .mini-action-button,
 .mini-send-button {
-  height: 20px;
+  min-height: 28px;
   border: 0;
   border-radius: 999px;
-  padding: 0 7px;
+  padding: 0 12px;
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
-  line-height: 20px;
+  line-height: 28px;
+  white-space: nowrap;
 }
 
 .mini-action-button {
