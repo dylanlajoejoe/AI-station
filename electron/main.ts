@@ -139,6 +139,56 @@ let aiConfig: Partial<AiConfig> = {
 
 let db: Database.Database;
 
+function normalizeAiConfig(config: Partial<AiConfig>): Partial<AiConfig> {
+  return {
+    baseUrl: config.baseUrl?.trim(),
+    apiKey: config.apiKey?.trim(),
+    model: config.model?.trim(),
+    timeoutMs: Number(config.timeoutMs) || 30000
+  };
+}
+
+function getStoredAiConfig() {
+  const rows = db.prepare('SELECT key, value FROM ai_config').all() as Array<{ key: keyof AiConfig; value: string }>;
+
+  return rows.reduce<Partial<AiConfig>>((config, row) => {
+    if (row.key === 'timeoutMs') {
+      config.timeoutMs = Number(row.value) || 30000;
+      return config;
+    }
+
+    config[row.key] = row.value;
+    return config;
+  }, {});
+}
+
+function loadAiConfig() {
+  const storedConfig = getStoredAiConfig();
+
+  aiConfig = normalizeAiConfig({
+    ...storedConfig,
+    baseUrl: process.env.AI_BASE_URL ?? storedConfig.baseUrl,
+    apiKey: process.env.AI_API_KEY ?? storedConfig.apiKey,
+    model: process.env.AI_MODEL ?? storedConfig.model,
+    timeoutMs: process.env.AI_TIMEOUT_MS ? Number(process.env.AI_TIMEOUT_MS) : storedConfig.timeoutMs
+  });
+}
+
+function saveAiConfig(config: Partial<AiConfig>) {
+  const normalizedConfig = normalizeAiConfig(config);
+  const statement = db.prepare(`
+    INSERT INTO ai_config (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `);
+
+  for (const [key, value] of Object.entries(normalizedConfig)) {
+    if (value !== undefined) {
+      statement.run(key, String(value));
+    }
+  }
+}
+
 function mapSession(row: SessionRow) {
   return {
     id: row.id,
@@ -518,6 +568,11 @@ function initDatabase() {
       created_at TEXT NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id)
     );
+
+    CREATE TABLE IF NOT EXISTS ai_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 }
 
@@ -586,12 +641,13 @@ ipcMain.handle('config:getAiConfig', async () => ({
 }));
 
 ipcMain.handle('config:setAiConfig', async (_event, config: AiConfig) => {
-  aiConfig = {
-    baseUrl: config.baseUrl.trim(),
-    apiKey: config.apiKey.trim(),
-    model: config.model.trim(),
-    timeoutMs: config.timeoutMs || 30000
-  };
+  aiConfig = normalizeAiConfig({
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey.trim() || aiConfig.apiKey,
+    model: config.model,
+    timeoutMs: config.timeoutMs
+  });
+  saveAiConfig(aiConfig);
 
   return { ok: true };
 });
@@ -951,6 +1007,7 @@ function createMainWindow() {
 
 void app.whenReady().then(() => {
   initDatabase();
+  loadAiConfig();
   Menu.setApplicationMenu(null);
   createMainWindow();
 
