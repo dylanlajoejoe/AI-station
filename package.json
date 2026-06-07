@@ -15,11 +15,11 @@
     "@vitejs/plugin-react": "5.1.1",
     "better-sqlite3": "12.10.0",
     "concurrently": "9.2.1",
-    "electron": "37.5.1",
+    "electron": "42.3.3",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "typescript": "5.9.3",
-    "vite": "7.1.12",
+    "vite": "7.3.5",
     "wait-on": "9.0.1"
   },
   "devDependencies": {

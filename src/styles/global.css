@@ -571,6 +571,7 @@ h1 {
 }
 
 .ai-config-box {
+  grid-row: 1;
   display: grid;
   gap: 8px;
   padding: 14px;
@@ -709,6 +710,7 @@ h1 {
 }
 
 .message-list {
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -751,6 +753,7 @@ h1 {
 }
 
 .chat-input-row {
+  grid-row: 3;
   display: block;
 }
 
