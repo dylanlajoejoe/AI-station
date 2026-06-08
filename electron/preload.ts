@@ -30,8 +30,9 @@ type SaveTextResult = {
 type FileEditSuggestion = {
   id: string;
   sessionId: string;
-  operation: 'update' | 'create' | 'delete';
+  operation: 'update' | 'create' | 'delete' | 'rename';
   filePath: string;
+  targetPath: string | null;
   fileName: string;
   originalHash: string | null;
   proposedContent: string | null;
@@ -44,8 +45,9 @@ type FileEditSuggestion = {
 type ApplyFileEditParams = {
   sessionId: string;
   suggestionId: string;
-  operation: 'update' | 'create' | 'delete';
+  operation: 'update' | 'create' | 'delete' | 'rename';
   filePath: string;
+  targetPath: string | null;
   expectedOriginalHash: string | null;
   proposedContent: string | null;
   sensitivePathConfirmed: boolean;
@@ -170,6 +172,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   platform: process.platform,
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
+  createWorkspaceEntry: (params: { type: 'file' | 'directory'; name: string }) => ipcRenderer.invoke('fileTree:createEntry', params) as Promise<FileTreeNode>,
   readTextPreview: (filePath: string) => ipcRenderer.invoke('file:readTextPreview', filePath) as Promise<TextPreviewResult>,
   saveTextFile: (params: SaveTextFileParams) => ipcRenderer.invoke('file:saveText', params) as Promise<SaveTextResult>,
   applyFileEdit: (params: ApplyFileEditParams) => ipcRenderer.invoke('file:applyEdit', params) as Promise<ApplyFileEditResult>,

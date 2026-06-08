@@ -32,6 +32,11 @@ type SessionContextMenuState = {
   session: SessionRecord;
 } | null;
 
+type WorkspaceContextMenuState = {
+  x: number;
+  y: number;
+} | null;
+
 type TopMenuKey = 'file' | 'edit';
 
 type FilePreviewState = {
@@ -77,6 +82,48 @@ function formatModifiedAt(value: string | null) {
   return new Date(value).toLocaleString('zh-CN', {
     hour12: false
   });
+}
+
+function getFriendlyErrorMessage(error: unknown, fallback: string) {
+  const rawMessage = error instanceof Error ? error.message : fallback;
+  const message = rawMessage
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim();
+
+  if (!message) {
+    return fallback;
+  }
+
+  if (message.includes('AI 回复已停止')) {
+    return '回复已停止';
+  }
+
+  if (message.includes('AI 接口请求超时')) {
+    return 'AI 回复超时，请稍后重试。';
+  }
+
+  if (message.includes('AI 接口请求失败')) {
+    return 'AI 服务请求失败，请检查配置或稍后重试。';
+  }
+
+  if (message.includes('未配置')) {
+    return `${message}。请先在 AI 配置中填写完整信息。`;
+  }
+
+  if (message.includes('文件已被外部修改')) {
+    return '文件已被其他程序修改，请重新打开后再保存。';
+  }
+
+  if (message.includes('只能操作当前工作区内') || message.includes('只能保存当前工作区内') || message.includes('只能删除当前工作区内')) {
+    return '只能操作当前工作区内的文件。';
+  }
+
+  if (message.includes('敏感文件') || message.includes('隐藏路径')) {
+    return '该文件位于隐藏或敏感路径，请确认后再继续。';
+  }
+
+  return message;
 }
 
 function isSensitiveFilePath(filePath: string) {
@@ -209,6 +256,7 @@ export function App() {
   const [aiPanelWidth, setAiPanelWidth] = useState(390);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
+  const [workspaceContextMenu, setWorkspaceContextMenu] = useState<WorkspaceContextMenuState>(null);
   const [openTopMenu, setOpenTopMenu] = useState<TopMenuKey | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const [openPreviewTabs, setOpenPreviewTabs] = useState<FilePreviewTab[]>([]);
@@ -252,6 +300,7 @@ export function App() {
     const closeContextMenu = () => {
       setContextMenu(null);
       setSessionContextMenu(null);
+      setWorkspaceContextMenu(null);
       setOpenTopMenu(null);
     };
 
@@ -344,9 +393,10 @@ export function App() {
         messageId?: string;
         filePath?: string;
         fileName?: string;
-        operation?: 'update' | 'create' | 'delete';
+        operation?: 'update' | 'create' | 'delete' | 'rename';
         originalHash?: string | null;
         proposedHash?: string | null;
+        targetPath?: string | null;
         summary?: string;
       };
 
@@ -359,6 +409,7 @@ export function App() {
         sessionId,
         operation: payload.operation ?? 'update',
         filePath: payload.filePath,
+        targetPath: payload.targetPath ?? null,
         fileName: payload.fileName,
         originalHash: payload.originalHash ?? null,
         proposedContent: '',
@@ -568,7 +619,7 @@ export function App() {
           preview: {
             status: 'error',
             content: '',
-            message: error instanceof Error ? error.message : '文件内容读取失败'
+            message: getFriendlyErrorMessage(error, '文件内容读取失败')
           }
         }
         : tab));
@@ -657,9 +708,9 @@ export function App() {
         ? {
           ...currentTab,
           isSaving: false,
-          saveMessage: error instanceof Error ? error.message : '保存失败'
+          saveMessage: getFriendlyErrorMessage(error, '保存失败')
         }
-        : currentTab));
+      : currentTab));
     }
   };
 
@@ -708,12 +759,58 @@ export function App() {
 
   const handleNodeContextMenu = (event: ReactMouseEvent, node: FileTreeViewNode) => {
     event.preventDefault();
+    event.stopPropagation();
     setSelectedNode(node);
     setContextMenu({
       x: event.clientX,
       y: event.clientY,
       node
     });
+  };
+
+  const handleWorkspaceContextMenu = (event: ReactMouseEvent) => {
+    event.preventDefault();
+
+    if (!currentDirectory) {
+      return;
+    }
+
+    setWorkspaceContextMenu({
+      x: event.clientX,
+      y: event.clientY
+    });
+  };
+
+  const refreshFileTree = async () => {
+    if (!currentDirectory) {
+      return;
+    }
+
+    const nodes = await window.aiWorkspace.listFileTree(currentDirectory);
+    setFileTree(nodes);
+  };
+
+  const handleCreateWorkspaceEntry = async (type: 'file' | 'directory') => {
+    const label = type === 'file' ? '文件' : '文件夹';
+    const name = window.prompt(`请输入新${label}名称`);
+
+    setWorkspaceContextMenu(null);
+
+    if (!name?.trim()) {
+      return;
+    }
+
+    try {
+      await window.aiWorkspace.createWorkspaceEntry({ type, name: name.trim() });
+      await refreshFileTree();
+    } catch (error) {
+      window.alert(getFriendlyErrorMessage(error, `新建${label}失败`));
+    }
+  };
+
+  const handleWorkspacePlaceholder = (message: string) => {
+    setWorkspaceContextMenu(null);
+    window.alert(message);
   };
 
   const handleAddToChat = (node: FileTreeNode) => {
@@ -842,9 +939,9 @@ export function App() {
       }
       void window.aiWorkspace.listSessions().then(setSessions);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'AI 接口调用失败';
+      const errorMessage = getFriendlyErrorMessage(error, 'AI 接口调用失败');
 
-      if (errorMessage === 'AI 回复已停止') {
+      if (errorMessage === '回复已停止') {
         setMessages((currentMessages) => currentMessages.map((message) => streamingMessageId && message.id === streamingMessageId
           ? {
             ...message,
@@ -884,8 +981,13 @@ export function App() {
       return;
     }
 
-    if (suggestion.operation !== 'delete' && !suggestion.proposedContent) {
+    if (suggestion.operation !== 'delete' && suggestion.operation !== 'rename' && !suggestion.proposedContent) {
       window.alert('历史编辑建议无法直接应用，请重新生成修改建议。');
+      return;
+    }
+
+    if (suggestion.operation === 'rename' && !suggestion.targetPath) {
+      window.alert('重命名建议缺少目标路径，请重新生成修改建议。');
       return;
     }
 
@@ -898,7 +1000,7 @@ export function App() {
     }
 
     const sensitivePathConfirmed = isSensitiveFilePath(suggestion.filePath)
-      ? window.confirm(`文件“${suggestion.fileName}”位于隐藏或敏感路径，确认${suggestion.operation === 'delete' ? '删除' : '应用'}吗？`)
+      ? window.confirm(`文件“${suggestion.fileName}”位于隐藏或敏感路径，确认${suggestion.operation === 'delete' ? '删除' : suggestion.operation === 'rename' ? '重命名' : '应用'}吗？`)
       : false;
 
     if (isSensitiveFilePath(suggestion.filePath) && !sensitivePathConfirmed) {
@@ -913,6 +1015,7 @@ export function App() {
         suggestionId: suggestion.id,
         operation: suggestion.operation,
         filePath: suggestion.filePath,
+        targetPath: suggestion.targetPath,
         expectedOriginalHash: suggestion.originalHash,
         proposedContent: suggestion.proposedContent,
         sensitivePathConfirmed,
@@ -930,19 +1033,22 @@ export function App() {
             ...tab,
             node: {
               ...tab.node,
+              id: suggestion.operation === 'rename' ? suggestion.targetPath ?? tab.node.id : tab.node.id,
+              path: suggestion.operation === 'rename' ? suggestion.targetPath ?? tab.node.path : tab.node.path,
+              name: suggestion.operation === 'rename' && suggestion.targetPath ? suggestion.targetPath.split(/[\\/]/).pop() ?? tab.node.name : tab.node.name,
               size: result.size,
               modifiedAt: result.modifiedAt
             },
-            preview: {
+            preview: suggestion.operation === 'rename' ? tab.preview : {
               status: 'ready',
               content: suggestion.proposedContent ?? '',
               message: ''
             },
-            draftContent: suggestion.proposedContent ?? '',
+            draftContent: suggestion.operation === 'rename' ? tab.draftContent : suggestion.proposedContent ?? '',
             originalHash: result.nextHash,
             isDirty: false,
             isSaving: false,
-            saveMessage: suggestion.operation === 'create' ? 'AI 已创建文件' : 'AI 修改已应用'
+            saveMessage: suggestion.operation === 'create' ? 'AI 已创建文件' : suggestion.operation === 'rename' ? 'AI 已重命名文件' : 'AI 修改已应用'
           }
           : tab));
       setFileTree((currentTree) => updateTreeNode(currentTree, suggestion.filePath, (currentNode) => ({
@@ -956,10 +1062,10 @@ export function App() {
       setMessages((currentMessages) => [...currentMessages, {
         id: `file-edit-applied-${Date.now()}`,
         role: 'assistant',
-        content: `${suggestion.operation === 'delete' ? '已删除文件' : suggestion.operation === 'create' ? '已创建文件' : '已应用 AI 修改'}：${suggestion.fileName}\n${suggestion.summary}`
+        content: `${suggestion.operation === 'delete' ? '已删除文件' : suggestion.operation === 'create' ? '已创建文件' : suggestion.operation === 'rename' ? '已重命名文件' : '已应用 AI 修改'}：${suggestion.fileName}\n${suggestion.summary}`
       }]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '应用 AI 修改失败';
+      const message = getFriendlyErrorMessage(error, '应用 AI 修改失败');
       setFileEditSuggestions((currentSuggestions) => currentSuggestions.map((currentSuggestion) => currentSuggestion.id === suggestion.id
         ? { ...currentSuggestion, status: 'failed' }
         : currentSuggestion));
@@ -1060,6 +1166,25 @@ export function App() {
     );
   };
 
+  const renderWorkspaceContextMenu = () => {
+    if (!workspaceContextMenu) {
+      return null;
+    }
+
+    return (
+      <div
+        className="context-menu"
+        onClick={(event) => event.stopPropagation()}
+        style={{ left: workspaceContextMenu.x, top: workspaceContextMenu.y }}
+      >
+        <button className="context-menu-item primary" onClick={() => void handleCreateWorkspaceEntry('file')}>新建文件</button>
+        <button className="context-menu-item primary" onClick={() => void handleCreateWorkspaceEntry('directory')}>新建文件夹</button>
+        <button className="context-menu-item" onClick={() => handleWorkspacePlaceholder('打开目录功能稍后接入。')}>打开目录</button>
+        <button className="context-menu-item" onClick={() => handleWorkspacePlaceholder('复制工作区路径功能稍后接入。')}>复制工作区路径</button>
+      </div>
+    );
+  };
+
   const renderFileEditSuggestion = (suggestionId: string | undefined) => {
     if (!suggestionId) {
       return null;
@@ -1073,8 +1198,8 @@ export function App() {
 
     const isApplied = suggestion.status === 'applied';
     const isFailed = suggestion.status === 'failed';
-    const actionLabel = suggestion.operation === 'delete' ? '删除文件' : suggestion.operation === 'create' ? '创建文件' : '应用修改';
-    const title = suggestion.operation === 'delete' ? 'AI 删除文件建议' : suggestion.operation === 'create' ? 'AI 创建文件建议' : 'AI 文件修改建议';
+    const actionLabel = suggestion.operation === 'delete' ? '删除文件' : suggestion.operation === 'create' ? '创建文件' : suggestion.operation === 'rename' ? '重命名文件' : '应用修改';
+    const title = suggestion.operation === 'delete' ? 'AI 删除文件建议' : suggestion.operation === 'create' ? 'AI 创建文件建议' : suggestion.operation === 'rename' ? 'AI 重命名建议' : 'AI 文件修改建议';
 
     return (
       <div className="file-edit-suggestion">
@@ -1083,9 +1208,12 @@ export function App() {
           <span>{isApplied ? '已应用' : isFailed ? '应用失败' : '待确认'}</span>
         </div>
         <div className="file-edit-suggestion-path" title={suggestion.filePath}>{suggestion.fileName}</div>
+        {suggestion.operation === 'rename' && suggestion.targetPath && (
+          <div className="file-edit-suggestion-path" title={suggestion.targetPath}>目标：{suggestion.targetPath}</div>
+        )}
         <p>{suggestion.summary}</p>
         <button
-          disabled={isApplied || applyingEditId === suggestion.id || (suggestion.operation !== 'delete' && !suggestion.proposedContent)}
+          disabled={isApplied || applyingEditId === suggestion.id || (suggestion.operation !== 'delete' && suggestion.operation !== 'rename' && !suggestion.proposedContent)}
           onClick={() => void handleApplyFileEdit(suggestion)}
           type="button"
         >
@@ -1153,7 +1281,7 @@ export function App() {
             当前目录：{currentDirectory ?? '请选择一个本地目录'}
           </div>
           <div className="soft-note">AI 可定位你输入的工作区内路径，但不会默认读取文件内容。</div>
-          <nav className="folder-list">
+          <nav className="folder-list" onContextMenu={handleWorkspaceContextMenu}>
             {fileTreeError && <div className="folder-empty">{fileTreeError}</div>}
             {!fileTreeError && fileTree.length === 0 && (
               <div className="folder-empty">点击上方“选择目录”，这里会显示文件树。</div>
@@ -1394,6 +1522,7 @@ export function App() {
       </footer>
       {renderContextMenu()}
       {renderSessionContextMenu()}
+      {renderWorkspaceContextMenu()}
     </main>
   );
 }

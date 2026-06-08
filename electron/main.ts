@@ -2,7 +2,7 @@ import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron';
 import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import { watch } from 'fs';
-import { mkdir, readFile, readdir, realpath, stat, unlink, writeFile } from 'fs/promises';
+import { mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'fs/promises';
 import path from 'path';
 
 const isDev = !app.isPackaged;
@@ -100,8 +100,9 @@ type SendMessageResult = {
 type FileEditSuggestion = {
   id: string;
   sessionId: string;
-  operation: 'update' | 'create' | 'delete';
+  operation: 'update' | 'create' | 'delete' | 'rename';
   filePath: string;
+  targetPath: string | null;
   fileName: string;
   originalHash: string | null;
   proposedContent: string | null;
@@ -114,13 +115,19 @@ type FileEditSuggestion = {
 type ApplyFileEditParams = {
   sessionId: string;
   suggestionId: string;
-  operation: 'update' | 'create' | 'delete';
+  operation: 'update' | 'create' | 'delete' | 'rename';
   filePath: string;
+  targetPath: string | null;
   expectedOriginalHash: string | null;
   proposedContent: string | null;
   sensitivePathConfirmed: boolean;
   deleteConfirmed: boolean;
   summary: string;
+};
+
+type CreateWorkspaceEntryParams = {
+  type: 'file' | 'directory';
+  name: string;
 };
 
 type SessionEventRow = {
@@ -508,6 +515,102 @@ async function deleteEditableTextFile(params: { filePath: string; expectedOrigin
   };
 }
 
+async function renameWorkspaceEntry(params: { filePath: string; targetPath: string; expectedOriginalHash: string | null; sensitivePathConfirmed: boolean }) {
+  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
+  const resolvedTargetPath = path.resolve(params.targetPath);
+
+  if (!isInsideWorkspace(resolvedWorkspacePath, resolvedTargetPath)) {
+    throw new Error('只能重命名到当前工作区内');
+  }
+
+  const sourceStat = await stat(resolvedFilePath);
+  const realSourcePath = await realpath(resolvedFilePath);
+
+  if (!isInsideWorkspace(resolvedWorkspacePath, realSourcePath)) {
+    throw new Error('只能重命名当前工作区内的文件');
+  }
+
+  if ((isSensitivePath(resolvedWorkspacePath, realSourcePath) || isSensitivePath(resolvedWorkspacePath, resolvedTargetPath)) && !params.sensitivePathConfirmed) {
+    throw new Error('该路径属于敏感文件或隐藏路径，请确认后再重命名');
+  }
+
+  try {
+    await stat(resolvedTargetPath);
+    throw new Error('目标路径已存在，不能重命名');
+  } catch (error) {
+    if (error instanceof Error && error.message === '目标路径已存在，不能重命名') {
+      throw error;
+    }
+  }
+
+  if (sourceStat.isFile() && params.expectedOriginalHash) {
+    assertTextFileExtension(resolvedFilePath);
+    const currentContent = await readFile(realSourcePath, 'utf8');
+    const currentHash = hashTextContent(currentContent);
+
+    if (currentHash !== params.expectedOriginalHash) {
+      throw new Error('文件已被外部修改，请重新生成重命名建议');
+    }
+  }
+
+  await mkdir(path.dirname(resolvedTargetPath), { recursive: true });
+  await rename(realSourcePath, resolvedTargetPath);
+  const nextStat = await stat(resolvedTargetPath);
+
+  return {
+    size: nextStat.isFile() ? nextStat.size : 0,
+    modifiedAt: nextStat.mtime.toISOString(),
+    nextHash: params.expectedOriginalHash ?? ''
+  };
+}
+
+async function createWorkspaceEntry(params: CreateWorkspaceEntryParams) {
+  const workspacePath = await getTrustedWorkspacePath();
+  const normalizedName = params.name.trim();
+
+  if (!normalizedName) {
+    throw new Error('请输入名称');
+  }
+
+  if (path.isAbsolute(normalizedName)) {
+    throw new Error('名称不能是绝对路径');
+  }
+
+  const targetPath = path.resolve(workspacePath, normalizedName);
+
+  if (!isInsideWorkspace(workspacePath, targetPath)) {
+    throw new Error('只能在当前工作区内创建');
+  }
+
+  try {
+    await stat(targetPath);
+    throw new Error('目标已存在');
+  } catch (error) {
+    if (error instanceof Error && error.message === '目标已存在') {
+      throw error;
+    }
+  }
+
+  if (params.type === 'directory') {
+    await mkdir(targetPath, { recursive: true });
+  } else {
+    assertTextFileExtension(targetPath);
+    await mkdir(path.dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, '', 'utf8');
+  }
+
+  const entryStat = await stat(targetPath);
+
+  return {
+    id: targetPath,
+    name: path.basename(targetPath),
+    path: targetPath,
+    type: params.type,
+    size: params.type === 'file' ? entryStat.size : null,
+    modifiedAt: entryStat.mtime.toISOString()
+  };
+}
+
 function hasFilteredPathSegment(workspacePath: string, targetPath: string) {
   const relativePath = path.relative(path.resolve(workspacePath), path.resolve(targetPath));
   const segments = relativePath.split(path.sep).filter(Boolean);
@@ -732,13 +835,14 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
   const candidate = parsed as {
     operation?: unknown;
     filePath?: unknown;
+    targetPath?: unknown;
     originalHash?: unknown;
     nextContent?: unknown;
     summary?: unknown;
   };
 
   if (
-    (candidate.operation !== 'update' && candidate.operation !== 'create' && candidate.operation !== 'delete')
+    (candidate.operation !== 'update' && candidate.operation !== 'create' && candidate.operation !== 'delete' && candidate.operation !== 'rename')
     || typeof candidate.filePath !== 'string'
     || typeof candidate.summary !== 'string'
   ) {
@@ -755,6 +859,7 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
       sessionId,
       operation: 'create',
       filePath: candidate.filePath,
+      targetPath: null,
       fileName: path.basename(candidate.filePath),
       originalHash: null,
       proposedContent: candidate.nextContent,
@@ -783,6 +888,28 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
       sessionId,
       operation: 'delete',
       filePath: file.path,
+      targetPath: null,
+      fileName: file.name,
+      originalHash: candidate.originalHash,
+      proposedContent: null,
+      proposedHash: null,
+      summary: candidate.summary.slice(0, 500),
+      status: 'suggested',
+      messageId: null
+    };
+  }
+
+  if (candidate.operation === 'rename') {
+    if (typeof candidate.targetPath !== 'string') {
+      return null;
+    }
+
+    return {
+      id: createId('file-edit'),
+      sessionId,
+      operation: 'rename',
+      filePath: file.path,
+      targetPath: candidate.targetPath,
       fileName: file.name,
       originalHash: candidate.originalHash,
       proposedContent: null,
@@ -802,6 +929,7 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
     sessionId,
     operation: 'update',
     filePath: file.path,
+    targetPath: null,
     fileName: file.name,
     originalHash: candidate.originalHash,
     proposedContent: candidate.nextContent,
@@ -1248,6 +1376,10 @@ ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
   });
 });
 
+ipcMain.handle('fileTree:createEntry', async (_event, params: CreateWorkspaceEntryParams) => {
+  return createWorkspaceEntry(params);
+});
+
 ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
   const fileStat = await assertEditableTextFile(filePath);
   const content = await readFile(filePath, 'utf8');
@@ -1279,17 +1411,25 @@ ipcMain.handle('file:applyEdit', async (_event, params: ApplyFileEditParams) => 
           sensitivePathConfirmed: params.sensitivePathConfirmed,
           deleteConfirmed: params.deleteConfirmed
         })
-        : await writeEditableTextFile({
-          workspacePath: null,
-          filePath: params.filePath,
-          expectedOriginalHash: params.expectedOriginalHash ?? '',
-          content: params.proposedContent ?? '',
-          sensitivePathConfirmed: params.sensitivePathConfirmed
-        });
+        : params.operation === 'rename'
+          ? await renameWorkspaceEntry({
+            filePath: params.filePath,
+            targetPath: params.targetPath ?? '',
+            expectedOriginalHash: params.expectedOriginalHash,
+            sensitivePathConfirmed: params.sensitivePathConfirmed
+          })
+          : await writeEditableTextFile({
+            workspacePath: null,
+            filePath: params.filePath,
+            expectedOriginalHash: params.expectedOriginalHash ?? '',
+            content: params.proposedContent ?? '',
+            sensitivePathConfirmed: params.sensitivePathConfirmed
+          });
     const event = recordSessionEvent(params.sessionId, 'file_edit_applied', {
       suggestionId: params.suggestionId,
       operation: params.operation,
       filePath: params.filePath,
+      targetPath: params.targetPath,
       previousHash: params.expectedOriginalHash,
       nextHash: result.nextHash,
       size: result.size,
@@ -1310,6 +1450,7 @@ ipcMain.handle('file:applyEdit', async (_event, params: ApplyFileEditParams) => 
       suggestionId: params.suggestionId,
       operation: params.operation,
       filePath: params.filePath,
+      targetPath: params.targetPath,
       summary: params.summary,
       message: error instanceof Error ? error.message : '应用修改失败'
     });
@@ -1393,13 +1534,14 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件。',
               '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
               '你不能直接修改文件，只能生成修改建议。',
-              '如果用户明确要求修改、创建或删除文件，可以生成一个文件操作建议。',
+              '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
-              'JSON 字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete。',
+              'JSON 字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete、rename。',
               'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自已读取引用文件。',
               'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自已读取引用文件。',
+              'rename 必须包含 originalHash、targetPath，且 filePath 和 originalHash 必须来自已读取引用文件。',
               'create 必须包含 nextContent，filePath 必须在当前工作区内且是文本文件路径。',
-              '不要一次生成多个文件操作，不要生成 diff。删除文件必须等待用户确认。',
+              '不要一次生成多个文件操作，不要生成 diff。删除和重命名文件必须等待用户确认。',
               '',
               `当前工作区路径：${params.workspacePath ?? '未选择'}`,
               '用户消息路径定位结果：',
@@ -1469,6 +1611,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
         messageId: assistantMessage.id,
         operation: fileEditSuggestion.operation,
         filePath: fileEditSuggestion.filePath,
+        targetPath: fileEditSuggestion.targetPath,
         fileName: fileEditSuggestion.fileName,
         originalHash: fileEditSuggestion.originalHash,
         proposedHash: fileEditSuggestion.proposedHash,
@@ -1485,7 +1628,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('AI 回复已停止');
+      throw new Error('回复已停止');
     }
 
     throw error;

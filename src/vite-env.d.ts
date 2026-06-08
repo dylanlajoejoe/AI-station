@@ -30,8 +30,9 @@ type SaveTextResult = {
 type FileEditSuggestion = {
   id: string;
   sessionId: string;
-  operation: 'update' | 'create' | 'delete';
+  operation: 'update' | 'create' | 'delete' | 'rename';
   filePath: string;
+  targetPath: string | null;
   fileName: string;
   originalHash: string | null;
   proposedContent: string | null;
@@ -125,6 +126,10 @@ interface Window {
       path: string | null;
     }>;
     listFileTree: (directoryPath: string) => Promise<FileTreeNode[]>;
+    createWorkspaceEntry: (params: {
+      type: 'file' | 'directory';
+      name: string;
+    }) => Promise<FileTreeNode>;
     readTextPreview: (filePath: string) => Promise<TextPreviewResult>;
     saveTextFile: (params: {
       workspacePath: string | null;
@@ -136,8 +141,9 @@ interface Window {
     applyFileEdit: (params: {
       sessionId: string;
       suggestionId: string;
-      operation: 'update' | 'create' | 'delete';
+      operation: 'update' | 'create' | 'delete' | 'rename';
       filePath: string;
+      targetPath: string | null;
       expectedOriginalHash: string | null;
       proposedContent: string | null;
       sensitivePathConfirmed: boolean;

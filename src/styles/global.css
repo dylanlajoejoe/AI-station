@@ -452,9 +452,13 @@ textarea:focus-visible {
   padding: 9px 10px;
   background: transparent;
   color: var(--muted);
-  cursor: not-allowed;
+  cursor: pointer;
   text-align: left;
   font-size: 13px;
+}
+
+.context-menu-item:disabled {
+  cursor: not-allowed;
 }
 
 .context-menu-item.primary {
@@ -464,6 +468,10 @@ textarea:focus-visible {
 }
 
 .context-menu-item.primary:hover {
+  background: var(--panel-blue);
+}
+
+.context-menu-item:hover:not(:disabled) {
   background: var(--panel-blue);
 }
 
@@ -719,6 +727,10 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.text-preview-editor:focus-visible {
+  outline: none;
 }
 
 .preview-message {
