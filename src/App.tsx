@@ -198,6 +198,7 @@ export function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [currentSession, setCurrentSession] = useState<SessionRecord | null>(null);
   const [isSending, setIsSending] = useState(false);
+  const [streamingSessionId, setStreamingSessionId] = useState<string | null>(null);
   const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModel, setAiModel] = useState('');
@@ -271,6 +272,61 @@ export function App() {
     }
   }, [messages, isSending]);
 
+  useEffect(() => {
+    const offWorkspaceChanged = window.aiWorkspace.onWorkspaceChanged((event) => {
+      if (!currentDirectory || event.workspacePath !== currentDirectory) {
+        return;
+      }
+
+      void window.aiWorkspace.listFileTree(currentDirectory).then(setFileTree).catch(() => {
+        setFileTreeError('工作区文件变化后刷新失败');
+      });
+
+      setOpenPreviewTabs((currentTabs) => {
+        for (const tab of currentTabs) {
+          if (tab.isDirty || tab.preview.status !== 'ready') {
+            continue;
+          }
+
+          void window.aiWorkspace.readTextPreview(tab.node.path).then((result) => {
+            setOpenPreviewTabs((latestTabs) => latestTabs.map((latestTab) => latestTab.node.id === tab.node.id && !latestTab.isDirty
+              ? {
+                ...latestTab,
+                preview: { status: 'ready', content: result.content, message: '' },
+                draftContent: result.content,
+                originalHash: result.originalHash,
+                node: {
+                  ...latestTab.node,
+                  size: result.size,
+                  modifiedAt: result.modifiedAt
+                },
+                saveMessage: '外部变化已同步'
+              }
+              : latestTab));
+          }).catch(() => {
+            setOpenPreviewTabs((latestTabs) => latestTabs.map((latestTab) => latestTab.node.id === tab.node.id && !latestTab.isDirty
+              ? {
+                ...latestTab,
+                preview: {
+                  status: 'error',
+                  content: '',
+                  message: '文件已被移动、删除或无法读取'
+                },
+                saveMessage: '外部变化'
+              }
+              : latestTab));
+          });
+        }
+
+        return currentTabs.map((tab) => tab.isDirty
+          ? { ...tab, saveMessage: '有未保存修改，外部变化未自动同步' }
+          : tab);
+      });
+    });
+
+    return offWorkspaceChanged;
+  }, [currentDirectory]);
+
   const handleOpenSession = async (sessionId: string) => {
     const detail = await window.aiWorkspace.getSession({ sessionId });
     const events = await window.aiWorkspace.getSessionEvents({ sessionId });
@@ -288,23 +344,25 @@ export function App() {
         messageId?: string;
         filePath?: string;
         fileName?: string;
-        originalHash?: string;
-        proposedHash?: string;
+        operation?: 'update' | 'create' | 'delete';
+        originalHash?: string | null;
+        proposedHash?: string | null;
         summary?: string;
       };
 
-      if (!payload.suggestionId || !payload.filePath || !payload.fileName || !payload.originalHash || !payload.proposedHash || !payload.summary) {
+      if (!payload.suggestionId || !payload.filePath || !payload.fileName || !payload.summary) {
         return [];
       }
 
       return [{
         id: payload.suggestionId,
         sessionId,
+        operation: payload.operation ?? 'update',
         filePath: payload.filePath,
         fileName: payload.fileName,
-        originalHash: payload.originalHash,
+        originalHash: payload.originalHash ?? null,
         proposedContent: '',
-        proposedHash: payload.proposedHash,
+        proposedHash: payload.proposedHash ?? null,
         summary: payload.summary,
         status: appliedSuggestionIds.has(payload.suggestionId) ? 'applied' as const : 'suggested' as const,
         messageId: payload.messageId ?? null
@@ -731,6 +789,7 @@ export function App() {
     setMessages((currentMessages) => [...currentMessages, userMessage]);
     setChatInput('');
     setIsSending(true);
+    let streamingMessageId: string | null = null;
 
     try {
       const locatedPaths = await window.aiWorkspace.locatePaths({
@@ -741,12 +800,14 @@ export function App() {
         workspacePath: currentDirectory
       });
       setCurrentSession(session);
-      const streamingMessageId = `assistant-stream-${session.id}`;
+      setStreamingSessionId(session.id);
+      streamingMessageId = `assistant-stream-${session.id}`;
+      const currentStreamingMessageId = streamingMessageId;
 
       setMessages((currentMessages) => [
         ...currentMessages,
         {
-          id: streamingMessageId,
+          id: currentStreamingMessageId,
           role: 'assistant',
           content: ''
         }
@@ -781,34 +842,63 @@ export function App() {
       }
       void window.aiWorkspace.listSessions().then(setSessions);
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'AI 接口调用失败';
+
+      if (errorMessage === 'AI 回复已停止') {
+        setMessages((currentMessages) => currentMessages.map((message) => streamingMessageId && message.id === streamingMessageId
+          ? {
+            ...message,
+            content: message.content ? `${message.content}\n\n（回复已停止）` : '回复已停止'
+          }
+          : message));
+        return;
+      }
+
       setMessages((currentMessages) => [
         ...currentMessages,
         {
           id: `assistant-error-${createdAt}`,
           role: 'assistant',
-          content: error instanceof Error ? error.message : 'AI 接口调用失败'
+          content: errorMessage
         }
       ]);
     } finally {
       setIsSending(false);
+      setStreamingSessionId(null);
     }
+  };
+
+  const handleStopMessage = async () => {
+    if (!streamingSessionId) {
+      return;
+    }
+
+    await window.aiWorkspace.stopMessage({ sessionId: streamingSessionId });
   };
 
   const handleApplyFileEdit = async (suggestion: FileEditSuggestion) => {
     const dirtyTab = openPreviewTabs.find((tab) => tab.node.path === suggestion.filePath && tab.isDirty);
 
-    if (dirtyTab) {
+    if (dirtyTab && suggestion.operation !== 'create') {
       window.alert('当前文件有未保存修改，请先保存或取消自己的修改后再应用 AI 修改。');
       return;
     }
 
-    if (!suggestion.proposedContent) {
+    if (suggestion.operation !== 'delete' && !suggestion.proposedContent) {
       window.alert('历史编辑建议无法直接应用，请重新生成修改建议。');
       return;
     }
 
+    const deleteConfirmed = suggestion.operation === 'delete'
+      ? window.confirm(`确认删除文件“${suggestion.fileName}”吗？\n\n${suggestion.filePath}`)
+      : false;
+
+    if (suggestion.operation === 'delete' && !deleteConfirmed) {
+      return;
+    }
+
     const sensitivePathConfirmed = isSensitiveFilePath(suggestion.filePath)
-      ? window.confirm(`文件“${suggestion.fileName}”位于隐藏或敏感路径，确认应用 AI 修改吗？`)
+      ? window.confirm(`文件“${suggestion.fileName}”位于隐藏或敏感路径，确认${suggestion.operation === 'delete' ? '删除' : '应用'}吗？`)
       : false;
 
     if (isSensitiveFilePath(suggestion.filePath) && !sensitivePathConfirmed) {
@@ -821,45 +911,52 @@ export function App() {
       const result = await window.aiWorkspace.applyFileEdit({
         sessionId: suggestion.sessionId,
         suggestionId: suggestion.id,
+        operation: suggestion.operation,
         filePath: suggestion.filePath,
         expectedOriginalHash: suggestion.originalHash,
         proposedContent: suggestion.proposedContent,
         sensitivePathConfirmed,
+        deleteConfirmed,
         summary: suggestion.summary
       });
 
       setFileEditSuggestions((currentSuggestions) => currentSuggestions.map((currentSuggestion) => currentSuggestion.id === suggestion.id
         ? { ...currentSuggestion, status: 'applied' }
         : currentSuggestion));
-      setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.path === suggestion.filePath
-        ? {
-          ...tab,
-          node: {
-            ...tab.node,
-            size: result.size,
-            modifiedAt: result.modifiedAt
-          },
-          preview: {
-            status: 'ready',
-            content: suggestion.proposedContent,
-            message: ''
-          },
-          draftContent: suggestion.proposedContent,
-          originalHash: result.nextHash,
-          isDirty: false,
-          isSaving: false,
-          saveMessage: 'AI 修改已应用'
-        }
-        : tab));
+      setOpenPreviewTabs((currentTabs) => suggestion.operation === 'delete'
+        ? currentTabs.filter((tab) => tab.node.path !== suggestion.filePath)
+        : currentTabs.map((tab) => tab.node.path === suggestion.filePath
+          ? {
+            ...tab,
+            node: {
+              ...tab.node,
+              size: result.size,
+              modifiedAt: result.modifiedAt
+            },
+            preview: {
+              status: 'ready',
+              content: suggestion.proposedContent ?? '',
+              message: ''
+            },
+            draftContent: suggestion.proposedContent ?? '',
+            originalHash: result.nextHash,
+            isDirty: false,
+            isSaving: false,
+            saveMessage: suggestion.operation === 'create' ? 'AI 已创建文件' : 'AI 修改已应用'
+          }
+          : tab));
       setFileTree((currentTree) => updateTreeNode(currentTree, suggestion.filePath, (currentNode) => ({
         ...currentNode,
         size: result.size,
         modifiedAt: result.modifiedAt
       })));
+      if (currentDirectory) {
+        void window.aiWorkspace.listFileTree(currentDirectory).then(setFileTree);
+      }
       setMessages((currentMessages) => [...currentMessages, {
         id: `file-edit-applied-${Date.now()}`,
         role: 'assistant',
-        content: `已应用 AI 修改：${suggestion.fileName}\n${suggestion.summary}`
+        content: `${suggestion.operation === 'delete' ? '已删除文件' : suggestion.operation === 'create' ? '已创建文件' : '已应用 AI 修改'}：${suggestion.fileName}\n${suggestion.summary}`
       }]);
     } catch (error) {
       const message = error instanceof Error ? error.message : '应用 AI 修改失败';
@@ -976,21 +1073,23 @@ export function App() {
 
     const isApplied = suggestion.status === 'applied';
     const isFailed = suggestion.status === 'failed';
+    const actionLabel = suggestion.operation === 'delete' ? '删除文件' : suggestion.operation === 'create' ? '创建文件' : '应用修改';
+    const title = suggestion.operation === 'delete' ? 'AI 删除文件建议' : suggestion.operation === 'create' ? 'AI 创建文件建议' : 'AI 文件修改建议';
 
     return (
       <div className="file-edit-suggestion">
         <div className="file-edit-suggestion-header">
-          <strong>AI 文件修改建议</strong>
+          <strong>{title}</strong>
           <span>{isApplied ? '已应用' : isFailed ? '应用失败' : '待确认'}</span>
         </div>
         <div className="file-edit-suggestion-path" title={suggestion.filePath}>{suggestion.fileName}</div>
         <p>{suggestion.summary}</p>
         <button
-          disabled={isApplied || applyingEditId === suggestion.id || !suggestion.proposedContent}
+          disabled={isApplied || applyingEditId === suggestion.id || (suggestion.operation !== 'delete' && !suggestion.proposedContent)}
           onClick={() => void handleApplyFileEdit(suggestion)}
           type="button"
         >
-          {applyingEditId === suggestion.id ? '应用中' : isApplied ? '已应用' : '应用修改'}
+          {applyingEditId === suggestion.id ? '处理中' : isApplied ? '已应用' : actionLabel}
         </button>
       </div>
     );
@@ -1275,6 +1374,9 @@ export function App() {
                 />
                 <div className="chat-inline-actions">
                   <button className="mini-action-button" onClick={handleNewSession} type="button">新会话</button>
+                  {isSending && (
+                    <button className="mini-action-button" onClick={() => void handleStopMessage()} type="button">停止回复</button>
+                  )}
                   <button className="mini-send-button" disabled={isSending || !chatInput.trim()} onClick={() => void handleSendMessage()} type="button">
                     {isSending ? '发送中' : '发送'}
                   </button>

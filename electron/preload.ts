@@ -30,11 +30,12 @@ type SaveTextResult = {
 type FileEditSuggestion = {
   id: string;
   sessionId: string;
+  operation: 'update' | 'create' | 'delete';
   filePath: string;
   fileName: string;
-  originalHash: string;
-  proposedContent: string;
-  proposedHash: string;
+  originalHash: string | null;
+  proposedContent: string | null;
+  proposedHash: string | null;
   summary: string;
   status: 'suggested' | 'applied' | 'failed';
   messageId: string | null;
@@ -43,10 +44,12 @@ type FileEditSuggestion = {
 type ApplyFileEditParams = {
   sessionId: string;
   suggestionId: string;
+  operation: 'update' | 'create' | 'delete';
   filePath: string;
-  expectedOriginalHash: string;
-  proposedContent: string;
+  expectedOriginalHash: string | null;
+  proposedContent: string | null;
   sensitivePathConfirmed: boolean;
+  deleteConfirmed: boolean;
   summary: string;
 };
 
@@ -128,6 +131,11 @@ type MessageChunk = {
   content: string;
 };
 
+type WorkspaceChangeEvent = {
+  workspacePath: string | null;
+  path: string | null;
+};
+
 type SessionRecord = {
   id: string;
   title: string;
@@ -167,12 +175,20 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   applyFileEdit: (params: ApplyFileEditParams) => ipcRenderer.invoke('file:applyEdit', params) as Promise<ApplyFileEditResult>,
   locatePaths: (params: { workspacePath: string | null; content: string }) => ipcRenderer.invoke('file:locatePaths', params) as Promise<LocatedPathResult[]>,
   sendMessage: (params: SendMessageParams) => ipcRenderer.invoke('chat:sendMessage', params) as Promise<SendMessageResult>,
+  stopMessage: (params: { sessionId: string }) => ipcRenderer.invoke('chat:stopMessage', params) as Promise<{ ok: boolean }>,
   onMessageChunk: (callback: (chunk: MessageChunk) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, chunk: MessageChunk) => callback(chunk);
 
     ipcRenderer.on('chat:messageChunk', listener);
 
     return () => ipcRenderer.removeListener('chat:messageChunk', listener);
+  },
+  onWorkspaceChanged: (callback: (event: WorkspaceChangeEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, workspaceEvent: WorkspaceChangeEvent) => callback(workspaceEvent);
+
+    ipcRenderer.on('workspace:changed', listener);
+
+    return () => ipcRenderer.removeListener('workspace:changed', listener);
   },
   createSession: (params: { workspacePath: string | null }) => ipcRenderer.invoke('session:create', params) as Promise<SessionRecord>,
   listSessions: () => ipcRenderer.invoke('session:list') as Promise<SessionRecord[]>,

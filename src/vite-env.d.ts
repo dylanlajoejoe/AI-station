@@ -30,11 +30,12 @@ type SaveTextResult = {
 type FileEditSuggestion = {
   id: string;
   sessionId: string;
+  operation: 'update' | 'create' | 'delete';
   filePath: string;
   fileName: string;
-  originalHash: string;
-  proposedContent: string;
-  proposedHash: string;
+  originalHash: string | null;
+  proposedContent: string | null;
+  proposedHash: string | null;
   summary: string;
   status: 'suggested' | 'applied' | 'failed';
   messageId: string | null;
@@ -111,6 +112,11 @@ type MessageChunk = {
   content: string;
 };
 
+type WorkspaceChangeEvent = {
+  workspacePath: string | null;
+  path: string | null;
+};
+
 interface Window {
   aiWorkspace: {
     platform: NodeJS.Platform;
@@ -130,10 +136,12 @@ interface Window {
     applyFileEdit: (params: {
       sessionId: string;
       suggestionId: string;
+      operation: 'update' | 'create' | 'delete';
       filePath: string;
-      expectedOriginalHash: string;
-      proposedContent: string;
+      expectedOriginalHash: string | null;
+      proposedContent: string | null;
       sensitivePathConfirmed: boolean;
+      deleteConfirmed: boolean;
       summary: string;
     }) => Promise<ApplyFileEditResult>;
     locatePaths: (params: {
@@ -154,7 +162,13 @@ interface Window {
       referencedFiles: ReferencedFileContent[];
       fileEditSuggestion: FileEditSuggestion | null;
     }>;
+    stopMessage: (params: {
+      sessionId: string;
+    }) => Promise<{
+      ok: boolean;
+    }>;
     onMessageChunk: (callback: (chunk: MessageChunk) => void) => () => void;
+    onWorkspaceChanged: (callback: (event: WorkspaceChangeEvent) => void) => () => void;
     createSession: (params: {
       workspacePath: string | null;
     }) => Promise<SessionRecord>;

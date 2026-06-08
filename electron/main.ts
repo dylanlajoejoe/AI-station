@@ -1,7 +1,8 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron';
 import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
-import { readFile, readdir, realpath, stat, writeFile } from 'fs/promises';
+import { watch } from 'fs';
+import { mkdir, readFile, readdir, realpath, stat, unlink, writeFile } from 'fs/promises';
 import path from 'path';
 
 const isDev = !app.isPackaged;
@@ -99,11 +100,12 @@ type SendMessageResult = {
 type FileEditSuggestion = {
   id: string;
   sessionId: string;
+  operation: 'update' | 'create' | 'delete';
   filePath: string;
   fileName: string;
-  originalHash: string;
-  proposedContent: string;
-  proposedHash: string;
+  originalHash: string | null;
+  proposedContent: string | null;
+  proposedHash: string | null;
   summary: string;
   status: 'suggested' | 'applied' | 'failed';
   messageId: string | null;
@@ -112,10 +114,12 @@ type FileEditSuggestion = {
 type ApplyFileEditParams = {
   sessionId: string;
   suggestionId: string;
+  operation: 'update' | 'create' | 'delete';
   filePath: string;
-  expectedOriginalHash: string;
-  proposedContent: string;
+  expectedOriginalHash: string | null;
+  proposedContent: string | null;
   sensitivePathConfirmed: boolean;
+  deleteConfirmed: boolean;
   summary: string;
 };
 
@@ -189,6 +193,10 @@ let aiConfig: Partial<AiConfig> = {
 
 let db: Database.Database;
 let trustedWorkspacePath: string | null = null;
+let workspaceWatcher: ReturnType<typeof watch> | null = null;
+let workspaceChangeTimer: NodeJS.Timeout | null = null;
+let mainWindowRef: BrowserWindow | null = null;
+const activeChatControllers = new Map<string, AbortController>();
 
 function normalizeAiConfig(config: Partial<AiConfig>): Partial<AiConfig> {
   return {
@@ -293,6 +301,25 @@ function createId(prefix: string) {
 
 async function setTrustedWorkspacePath(workspacePath: string | null) {
   trustedWorkspacePath = workspacePath ? await realpath(workspacePath) : null;
+  workspaceWatcher?.close();
+  workspaceWatcher = null;
+
+  if (!trustedWorkspacePath) {
+    return;
+  }
+
+  workspaceWatcher = watch(trustedWorkspacePath, { recursive: process.platform === 'win32' }, (_eventType, filename) => {
+    if (workspaceChangeTimer) {
+      clearTimeout(workspaceChangeTimer);
+    }
+
+    workspaceChangeTimer = setTimeout(() => {
+      mainWindowRef?.webContents.send('workspace:changed', {
+        workspacePath: trustedWorkspacePath,
+        path: filename ? path.join(trustedWorkspacePath as string, filename.toString()) : null
+      });
+    }, 250);
+  });
 }
 
 async function getTrustedWorkspacePath() {
@@ -356,9 +383,30 @@ async function assertEditableTextFile(filePath: string) {
   return fileStat;
 }
 
-async function writeEditableTextFile(params: WriteEditableTextFileParams) {
+function assertTextFileExtension(filePath: string) {
+  const extension = path.extname(filePath).toLowerCase();
+
+  if (!previewableTextExtensions.has(extension)) {
+    throw new Error('该文件类型暂不支持操作');
+  }
+}
+
+async function resolveWorkspaceTargetPath(filePath: string) {
   const resolvedWorkspacePath = await getTrustedWorkspacePath();
-  const resolvedFilePath = path.resolve(params.filePath);
+  const resolvedFilePath = path.resolve(filePath);
+
+  if (!isInsideWorkspace(resolvedWorkspacePath, resolvedFilePath)) {
+    throw new Error('只能操作当前工作区内的文件');
+  }
+
+  return {
+    resolvedWorkspacePath,
+    resolvedFilePath
+  };
+}
+
+async function writeEditableTextFile(params: WriteEditableTextFileParams) {
+  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
 
   await assertEditableTextFile(resolvedFilePath);
 
@@ -391,6 +439,72 @@ async function writeEditableTextFile(params: WriteEditableTextFileParams) {
     size: nextStat.size,
     modifiedAt: nextStat.mtime.toISOString(),
     nextHash
+  };
+}
+
+async function createEditableTextFile(params: { filePath: string; content: string; sensitivePathConfirmed: boolean }) {
+  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
+  assertTextFileExtension(resolvedFilePath);
+
+  if (Buffer.byteLength(params.content, 'utf8') > maxPreviewFileSize) {
+    throw new Error('文件内容超过 1MB，已拒绝创建');
+  }
+
+  if (isSensitivePath(resolvedWorkspacePath, resolvedFilePath) && !params.sensitivePathConfirmed) {
+    throw new Error('该路径属于敏感文件或隐藏路径，请确认后再创建');
+  }
+
+  try {
+    await stat(resolvedFilePath);
+    throw new Error('目标文件已存在，不能覆盖创建');
+  } catch (error) {
+    if (error instanceof Error && error.message === '目标文件已存在，不能覆盖创建') {
+      throw error;
+    }
+  }
+
+  await mkdir(path.dirname(resolvedFilePath), { recursive: true });
+  await writeFile(resolvedFilePath, params.content, 'utf8');
+  const nextStat = await stat(resolvedFilePath);
+  const nextHash = hashTextContent(params.content);
+
+  return {
+    size: nextStat.size,
+    modifiedAt: nextStat.mtime.toISOString(),
+    nextHash
+  };
+}
+
+async function deleteEditableTextFile(params: { filePath: string; expectedOriginalHash: string; sensitivePathConfirmed: boolean; deleteConfirmed: boolean }) {
+  if (!params.deleteConfirmed) {
+    throw new Error('删除文件前必须确认');
+  }
+
+  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
+  await assertEditableTextFile(resolvedFilePath);
+  const realFilePath = await realpath(resolvedFilePath);
+
+  if (!isInsideWorkspace(resolvedWorkspacePath, realFilePath)) {
+    throw new Error('只能删除当前工作区内的文件');
+  }
+
+  if (isSensitivePath(resolvedWorkspacePath, realFilePath) && !params.sensitivePathConfirmed) {
+    throw new Error('该路径属于敏感文件或隐藏路径，请确认后再删除');
+  }
+
+  const currentContent = await readFile(realFilePath, 'utf8');
+  const currentHash = hashTextContent(currentContent);
+
+  if (currentHash !== params.expectedOriginalHash) {
+    throw new Error('文件已被外部修改，请重新生成删除建议');
+  }
+
+  await unlink(realFilePath);
+
+  return {
+    size: 0,
+    modifiedAt: new Date().toISOString(),
+    nextHash: ''
   };
 }
 
@@ -616,6 +730,7 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
   }
 
   const candidate = parsed as {
+    operation?: unknown;
     filePath?: unknown;
     originalHash?: unknown;
     nextContent?: unknown;
@@ -623,11 +738,34 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
   };
 
   if (
-    typeof candidate.filePath !== 'string'
-    || typeof candidate.originalHash !== 'string'
-    || typeof candidate.nextContent !== 'string'
+    (candidate.operation !== 'update' && candidate.operation !== 'create' && candidate.operation !== 'delete')
+    || typeof candidate.filePath !== 'string'
     || typeof candidate.summary !== 'string'
   ) {
+    return null;
+  }
+
+  if (candidate.operation === 'create') {
+    if (typeof candidate.nextContent !== 'string' || Buffer.byteLength(candidate.nextContent, 'utf8') > maxPreviewFileSize) {
+      return null;
+    }
+
+    return {
+      id: createId('file-edit'),
+      sessionId,
+      operation: 'create',
+      filePath: candidate.filePath,
+      fileName: path.basename(candidate.filePath),
+      originalHash: null,
+      proposedContent: candidate.nextContent,
+      proposedHash: hashTextContent(candidate.nextContent),
+      summary: candidate.summary.slice(0, 500),
+      status: 'suggested',
+      messageId: null
+    };
+  }
+
+  if (typeof candidate.originalHash !== 'string') {
     return null;
   }
 
@@ -635,13 +773,34 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
     && referencedFile.path === candidate.filePath
     && referencedFile.originalHash === candidate.originalHash);
 
-  if (!file || Buffer.byteLength(candidate.nextContent, 'utf8') > maxPreviewFileSize) {
+  if (!file) {
+    return null;
+  }
+
+  if (candidate.operation === 'delete') {
+    return {
+      id: createId('file-edit'),
+      sessionId,
+      operation: 'delete',
+      filePath: file.path,
+      fileName: file.name,
+      originalHash: candidate.originalHash,
+      proposedContent: null,
+      proposedHash: null,
+      summary: candidate.summary.slice(0, 500),
+      status: 'suggested',
+      messageId: null
+    };
+  }
+
+  if (typeof candidate.nextContent !== 'string' || Buffer.byteLength(candidate.nextContent, 'utf8') > maxPreviewFileSize) {
     return null;
   }
 
   return {
     id: createId('file-edit'),
     sessionId,
+    operation: 'update',
     filePath: file.path,
     fileName: file.name,
     originalHash: candidate.originalHash,
@@ -1107,15 +1266,29 @@ ipcMain.handle('file:saveText', async (_event, params: SaveTextFileParams) => {
 
 ipcMain.handle('file:applyEdit', async (_event, params: ApplyFileEditParams) => {
   try {
-    const result = await writeEditableTextFile({
-      workspacePath: null,
-      filePath: params.filePath,
-      expectedOriginalHash: params.expectedOriginalHash,
-      content: params.proposedContent,
-      sensitivePathConfirmed: params.sensitivePathConfirmed
-    });
+    const result = params.operation === 'create'
+      ? await createEditableTextFile({
+        filePath: params.filePath,
+        content: params.proposedContent ?? '',
+        sensitivePathConfirmed: params.sensitivePathConfirmed
+      })
+      : params.operation === 'delete'
+        ? await deleteEditableTextFile({
+          filePath: params.filePath,
+          expectedOriginalHash: params.expectedOriginalHash ?? '',
+          sensitivePathConfirmed: params.sensitivePathConfirmed,
+          deleteConfirmed: params.deleteConfirmed
+        })
+        : await writeEditableTextFile({
+          workspacePath: null,
+          filePath: params.filePath,
+          expectedOriginalHash: params.expectedOriginalHash ?? '',
+          content: params.proposedContent ?? '',
+          sensitivePathConfirmed: params.sensitivePathConfirmed
+        });
     const event = recordSessionEvent(params.sessionId, 'file_edit_applied', {
       suggestionId: params.suggestionId,
+      operation: params.operation,
       filePath: params.filePath,
       previousHash: params.expectedOriginalHash,
       nextHash: result.nextHash,
@@ -1135,6 +1308,7 @@ ipcMain.handle('file:applyEdit', async (_event, params: ApplyFileEditParams) => 
   } catch (error) {
     recordSessionEvent(params.sessionId, 'file_edit_failed', {
       suggestionId: params.suggestionId,
+      operation: params.operation,
       filePath: params.filePath,
       summary: params.summary,
       message: error instanceof Error ? error.message : '应用修改失败'
@@ -1147,12 +1321,24 @@ ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: strin
   return locatePathsInWorkspace(params.workspacePath, params.content);
 });
 
+ipcMain.handle('chat:stopMessage', async (_event, params: { sessionId: string }) => {
+  const controller = activeChatControllers.get(params.sessionId);
+
+  if (controller) {
+    controller.abort();
+    activeChatControllers.delete(params.sessionId);
+  }
+
+  return { ok: true };
+});
+
 ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Promise<SendMessageResult> => {
   const baseUrl = String(getRequiredConfig('baseUrl', 'AI Base URL')).replace(/\/$/, '');
   const apiKey = String(getRequiredConfig('apiKey', 'AI API Key'));
   const model = String(getRequiredConfig('model', 'AI Model'));
   const timeoutMs = Number(aiConfig.timeoutMs ?? 30000);
   const controller = new AbortController();
+  activeChatControllers.set(params.sessionId, controller);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const now = new Date().toISOString();
   const workspaceTree = params.workspacePath ? await collectWorkspaceTree(params.workspacePath) : null;
@@ -1207,10 +1393,13 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件。',
               '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
               '你不能直接修改文件，只能生成修改建议。',
-              '如果用户明确要求修改文件，首版只允许对一个已读取的引用文件生成完整新内容。',
+              '如果用户明确要求修改、创建或删除文件，可以生成一个文件操作建议。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
-              'JSON 字段必须是 filePath、originalHash、summary、nextContent。filePath 和 originalHash 必须来自已读取引用文件。',
-              '不要为多个文件生成建议，不要为未读取文件生成建议，不要生成 diff。',
+              'JSON 字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete。',
+              'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自已读取引用文件。',
+              'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自已读取引用文件。',
+              'create 必须包含 nextContent，filePath 必须在当前工作区内且是文本文件路径。',
+              '不要一次生成多个文件操作，不要生成 diff。删除文件必须等待用户确认。',
               '',
               `当前工作区路径：${params.workspacePath ?? '未选择'}`,
               '用户消息路径定位结果：',
@@ -1278,6 +1467,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       recordSessionEvent(params.sessionId, 'file_edit_suggested', {
         suggestionId: fileEditSuggestion.id,
         messageId: assistantMessage.id,
+        operation: fileEditSuggestion.operation,
         filePath: fileEditSuggestion.filePath,
         fileName: fileEditSuggestion.fileName,
         originalHash: fileEditSuggestion.originalHash,
@@ -1295,12 +1485,13 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('AI 接口请求超时');
+      throw new Error('AI 回复已停止');
     }
 
     throw error;
   } finally {
     clearTimeout(timeout);
+    activeChatControllers.delete(params.sessionId);
   }
 });
 
@@ -1317,6 +1508,10 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false
     }
+  });
+  mainWindowRef = mainWindow;
+  mainWindow.on('closed', () => {
+    mainWindowRef = null;
   });
 
   if (isDev) {
@@ -1340,6 +1535,8 @@ void app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  workspaceWatcher?.close();
+  workspaceWatcher = null;
   if (process.platform !== 'darwin') {
     app.quit();
   }

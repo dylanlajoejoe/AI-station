@@ -716,7 +716,9 @@ textarea:focus-visible {
   line-height: 1.65;
   outline: none;
   resize: none;
-  white-space: pre;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .preview-message {
