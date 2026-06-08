@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron';
 import Database from 'better-sqlite3';
-import { readFile, readdir, stat, writeFile } from 'fs/promises';
+import { createHash } from 'crypto';
+import { readFile, readdir, realpath, stat, writeFile } from 'fs/promises';
 import path from 'path';
 
 const isDev = !app.isPackaged;
@@ -48,7 +49,24 @@ type ReferencedFileContent = {
   path: string;
   status: 'read' | 'skipped';
   content: string | null;
+  originalHash: string | null;
   message: string;
+};
+
+type SaveTextFileParams = {
+  workspacePath: string | null;
+  filePath: string;
+  expectedOriginalHash: string;
+  content: string;
+  sensitivePathConfirmed: boolean;
+};
+
+type WriteEditableTextFileParams = {
+  workspacePath: string | null;
+  filePath: string;
+  expectedOriginalHash: string;
+  content: string;
+  sensitivePathConfirmed: boolean;
 };
 
 type WorkspaceTreeEntry = {
@@ -75,6 +93,38 @@ type SendMessageResult = {
   assistantMessage: ReturnType<typeof mapMessage>;
   locatedPaths: LocatedPathResult[];
   referencedFiles: ReferencedFileContent[];
+  fileEditSuggestion: FileEditSuggestion | null;
+};
+
+type FileEditSuggestion = {
+  id: string;
+  sessionId: string;
+  filePath: string;
+  fileName: string;
+  originalHash: string;
+  proposedContent: string;
+  proposedHash: string;
+  summary: string;
+  status: 'suggested' | 'applied' | 'failed';
+  messageId: string | null;
+};
+
+type ApplyFileEditParams = {
+  sessionId: string;
+  suggestionId: string;
+  filePath: string;
+  expectedOriginalHash: string;
+  proposedContent: string;
+  sensitivePathConfirmed: boolean;
+  summary: string;
+};
+
+type SessionEventRow = {
+  id: string;
+  session_id: string;
+  type: string;
+  payload_json: string;
+  created_at: string;
 };
 
 type ChatCompletionChunk = {
@@ -138,6 +188,7 @@ let aiConfig: Partial<AiConfig> = {
 };
 
 let db: Database.Database;
+let trustedWorkspacePath: string | null = null;
 
 function normalizeAiConfig(config: Partial<AiConfig>): Partial<AiConfig> {
   return {
@@ -209,8 +260,47 @@ function mapMessage(row: MessageRow) {
   };
 }
 
+function mapSessionEvent(row: SessionEventRow) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    type: row.type,
+    payload: JSON.parse(row.payload_json) as unknown,
+    createdAt: row.created_at
+  };
+}
+
+function recordSessionEvent(sessionId: string, type: string, payload: unknown) {
+  const event = {
+    id: createId('event'),
+    session_id: sessionId,
+    type,
+    payload_json: JSON.stringify(payload),
+    created_at: new Date().toISOString()
+  };
+
+  db.prepare(`
+    INSERT INTO session_events (id, session_id, type, payload_json, created_at)
+    VALUES (@id, @session_id, @type, @payload_json, @created_at)
+  `).run(event);
+
+  return mapSessionEvent(event);
+}
+
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function setTrustedWorkspacePath(workspacePath: string | null) {
+  trustedWorkspacePath = workspacePath ? await realpath(workspacePath) : null;
+}
+
+async function getTrustedWorkspacePath() {
+  if (!trustedWorkspacePath) {
+    throw new Error('请先选择工作区目录');
+  }
+
+  return trustedWorkspacePath;
 }
 
 function shouldHideEntry(name: string, isDirectory: boolean) {
@@ -229,6 +319,79 @@ function isInsideWorkspace(workspacePath: string, targetPath: string) {
   const relativePath = path.relative(path.resolve(workspacePath), path.resolve(targetPath));
 
   return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+}
+
+function hashTextContent(content: string) {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+function isSensitivePath(workspacePath: string, targetPath: string) {
+  const relativePath = path.relative(path.resolve(workspacePath), path.resolve(targetPath));
+  const segments = relativePath.split(path.sep).filter(Boolean);
+
+  return segments.some((segment, index) => {
+    const isDirectory = index < segments.length - 1;
+
+    return segment.startsWith('.') || sensitiveFileNames.has(segment.toLowerCase()) || (isDirectory && segment === '.git');
+  });
+}
+
+async function assertEditableTextFile(filePath: string) {
+  const fileStat = await stat(filePath);
+
+  if (!fileStat.isFile()) {
+    throw new Error('当前选择的不是文件');
+  }
+
+  if (fileStat.size > maxPreviewFileSize) {
+    throw new Error('文件超过 1MB，暂不支持编辑保存');
+  }
+
+  const extension = path.extname(filePath).toLowerCase();
+
+  if (!previewableTextExtensions.has(extension)) {
+    throw new Error('该文件类型暂不支持编辑保存');
+  }
+
+  return fileStat;
+}
+
+async function writeEditableTextFile(params: WriteEditableTextFileParams) {
+  const resolvedWorkspacePath = await getTrustedWorkspacePath();
+  const resolvedFilePath = path.resolve(params.filePath);
+
+  await assertEditableTextFile(resolvedFilePath);
+
+  const realFilePath = await realpath(resolvedFilePath);
+
+  if (!isInsideWorkspace(resolvedWorkspacePath, realFilePath)) {
+    throw new Error('只能保存当前工作区内的文件');
+  }
+
+  if (isSensitivePath(resolvedWorkspacePath, realFilePath) && !params.sensitivePathConfirmed) {
+    throw new Error('该路径属于敏感文件或隐藏路径，请确认后再保存');
+  }
+
+  const currentContent = await readFile(realFilePath, 'utf8');
+  const currentHash = hashTextContent(currentContent);
+
+  if (currentHash !== params.expectedOriginalHash) {
+    throw new Error('文件已被外部修改，请重新打开或刷新后再保存');
+  }
+
+  if (Buffer.byteLength(params.content, 'utf8') > maxPreviewFileSize) {
+    throw new Error('文件内容超过 1MB，已拒绝保存');
+  }
+
+  await writeFile(realFilePath, params.content, 'utf8');
+  const nextStat = await stat(realFilePath);
+  const nextHash = hashTextContent(params.content);
+
+  return {
+    size: nextStat.size,
+    modifiedAt: nextStat.mtime.toISOString(),
+    nextHash
+  };
 }
 
 function hasFilteredPathSegment(workspacePath: string, targetPath: string) {
@@ -341,6 +504,7 @@ async function readReferencedFiles(
           path: resolvedPath,
           status: 'skipped',
           content: null,
+          originalHash: null,
           message: '引用的是文件夹，暂不读取内容'
         });
         continue;
@@ -352,6 +516,7 @@ async function readReferencedFiles(
           path: resolvedPath,
           status: 'skipped',
           content: null,
+          originalHash: null,
           message: '文件超过 1MB，已拒绝读取'
         });
         continue;
@@ -365,16 +530,20 @@ async function readReferencedFiles(
           path: resolvedPath,
           status: 'skipped',
           content: null,
+          originalHash: null,
           message: '该文件类型暂不支持读取'
         });
         continue;
       }
 
+      const content = await readFile(resolvedPath, 'utf8');
+
       results.push({
         name: file.name,
         path: resolvedPath,
         status: 'read',
-        content: await readFile(resolvedPath, 'utf8'),
+        content,
+        originalHash: hashTextContent(content),
         message: '已读取引用文件内容'
       });
     } catch {
@@ -383,6 +552,7 @@ async function readReferencedFiles(
         path: resolvedPath,
         status: 'skipped',
         content: null,
+        originalHash: null,
         message: '引用文件不存在或无法读取'
       });
     }
@@ -394,6 +564,7 @@ async function readReferencedFiles(
       path: '',
       status: 'skipped',
       content: null,
+      originalHash: null,
       message: '最多读取前 10 个引用文件，其余已跳过'
     });
   }
@@ -411,7 +582,7 @@ function formatReferencedFiles(files: ReferencedFileContent[]) {
       return `### ${file.name}\n路径：${file.path || '-'}\n状态：${file.message}`;
     }
 
-    return `### ${file.name}\n路径：${file.path}\n状态：${file.message}\n内容：\n${file.content}`;
+    return `### ${file.name}\n路径：${file.path}\n状态：${file.message}\n原始 hash：${file.originalHash ?? '-'}\n内容：\n${file.content}`;
   }).join('\n\n');
 }
 
@@ -423,6 +594,67 @@ function formatReferencedFileNames(files: ReferencedFileContent[]) {
   }
 
   return readableFiles.map((file) => `- ${file.name}: ${file.path}`).join('\n');
+}
+
+function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFileContent[], sessionId: string): FileEditSuggestion | null {
+  const match = content.match(/```file-edit-suggestion\s*([\s\S]*?)```/);
+
+  if (!match) {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+
+  const candidate = parsed as {
+    filePath?: unknown;
+    originalHash?: unknown;
+    nextContent?: unknown;
+    summary?: unknown;
+  };
+
+  if (
+    typeof candidate.filePath !== 'string'
+    || typeof candidate.originalHash !== 'string'
+    || typeof candidate.nextContent !== 'string'
+    || typeof candidate.summary !== 'string'
+  ) {
+    return null;
+  }
+
+  const file = referencedFiles.find((referencedFile) => referencedFile.status === 'read'
+    && referencedFile.path === candidate.filePath
+    && referencedFile.originalHash === candidate.originalHash);
+
+  if (!file || Buffer.byteLength(candidate.nextContent, 'utf8') > maxPreviewFileSize) {
+    return null;
+  }
+
+  return {
+    id: createId('file-edit'),
+    sessionId,
+    filePath: file.path,
+    fileName: file.name,
+    originalHash: candidate.originalHash,
+    proposedContent: candidate.nextContent,
+    proposedHash: hashTextContent(candidate.nextContent),
+    summary: candidate.summary.slice(0, 500),
+    status: 'suggested',
+    messageId: null
+  };
+}
+
+function stripFileEditSuggestionBlock(content: string) {
+  return content.replace(/```file-edit-suggestion\s*[\s\S]*?```/g, '').trim();
 }
 
 function mergeReferencedFilesWithLocatedPaths(
@@ -573,6 +805,15 @@ function initDatabase() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS session_events (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
   `);
 }
 
@@ -664,6 +905,8 @@ ipcMain.handle('dialog:selectDirectory', async () => {
     };
   }
 
+  await setTrustedWorkspacePath(result.filePaths[0]);
+
   return {
     canceled: false,
     path: result.filePaths[0]
@@ -671,6 +914,7 @@ ipcMain.handle('dialog:selectDirectory', async () => {
 });
 
 ipcMain.handle('session:create', async (_event, params: { workspacePath: string | null }) => {
+  await setTrustedWorkspacePath(params.workspacePath);
   const now = new Date().toISOString();
   const session = {
     id: createId('session'),
@@ -709,6 +953,8 @@ ipcMain.handle('session:get', async (_event, params: { sessionId: string }) => {
     throw new Error('会话不存在');
   }
 
+  await setTrustedWorkspacePath(session.workspace_path);
+
   const messages = db.prepare(`
     SELECT id, session_id, role, content, created_at
     FROM messages
@@ -720,6 +966,17 @@ ipcMain.handle('session:get', async (_event, params: { sessionId: string }) => {
     session: mapSession(session),
     messages: messages.map(mapMessage)
   };
+});
+
+ipcMain.handle('session:getEvents', async (_event, params: { sessionId: string }) => {
+  const events = db.prepare(`
+    SELECT id, session_id, type, payload_json, created_at
+    FROM session_events
+    WHERE session_id = ?
+    ORDER BY created_at ASC
+  `).all(params.sessionId) as SessionEventRow[];
+
+  return events.map(mapSessionEvent);
 });
 
 ipcMain.handle('session:rename', async (_event, params: { sessionId: string; title: string }) => {
@@ -833,51 +1090,57 @@ ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
 });
 
 ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
-  const fileStat = await stat(filePath);
-
-  if (!fileStat.isFile()) {
-    throw new Error('当前选择的不是文件');
-  }
-
-  if (fileStat.size > maxPreviewFileSize) {
-    throw new Error('文件超过 1MB，暂不直接预览');
-  }
-
-  const extension = path.extname(filePath).toLowerCase();
-
-  if (!previewableTextExtensions.has(extension)) {
-    throw new Error('该文件类型暂不支持内容预览');
-  }
+  const fileStat = await assertEditableTextFile(filePath);
+  const content = await readFile(filePath, 'utf8');
 
   return {
-    content: await readFile(filePath, 'utf8')
+    content,
+    originalHash: hashTextContent(content),
+    size: fileStat.size,
+    modifiedAt: fileStat.mtime.toISOString()
   };
 });
 
-ipcMain.handle('file:saveText', async (_event, params: { filePath: string; content: string }) => {
-  const fileStat = await stat(params.filePath);
+ipcMain.handle('file:saveText', async (_event, params: SaveTextFileParams) => {
+  return writeEditableTextFile(params);
+});
 
-  if (!fileStat.isFile()) {
-    throw new Error('当前选择的不是文件');
+ipcMain.handle('file:applyEdit', async (_event, params: ApplyFileEditParams) => {
+  try {
+    const result = await writeEditableTextFile({
+      workspacePath: null,
+      filePath: params.filePath,
+      expectedOriginalHash: params.expectedOriginalHash,
+      content: params.proposedContent,
+      sensitivePathConfirmed: params.sensitivePathConfirmed
+    });
+    const event = recordSessionEvent(params.sessionId, 'file_edit_applied', {
+      suggestionId: params.suggestionId,
+      filePath: params.filePath,
+      previousHash: params.expectedOriginalHash,
+      nextHash: result.nextHash,
+      size: result.size,
+      modifiedAt: result.modifiedAt,
+      summary: params.summary
+    });
+
+    return {
+      ok: true,
+      filePath: params.filePath,
+      size: result.size,
+      modifiedAt: result.modifiedAt,
+      nextHash: result.nextHash,
+      logId: event.id
+    };
+  } catch (error) {
+    recordSessionEvent(params.sessionId, 'file_edit_failed', {
+      suggestionId: params.suggestionId,
+      filePath: params.filePath,
+      summary: params.summary,
+      message: error instanceof Error ? error.message : '应用修改失败'
+    });
+    throw error;
   }
-
-  const extension = path.extname(params.filePath).toLowerCase();
-
-  if (!previewableTextExtensions.has(extension)) {
-    throw new Error('该文件类型暂不支持编辑保存');
-  }
-
-  if (Buffer.byteLength(params.content, 'utf8') > maxPreviewFileSize) {
-    throw new Error('文件内容超过 1MB，已拒绝保存');
-  }
-
-  await writeFile(params.filePath, params.content, 'utf8');
-  const nextStat = await stat(params.filePath);
-
-  return {
-    size: nextStat.size,
-    modifiedAt: nextStat.mtime.toISOString()
-  };
 });
 
 ipcMain.handle('file:locatePaths', async (_event, params: { workspacePath: string | null; content: string }) => {
@@ -901,6 +1164,15 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
   const referencedFiles = await readReferencedFiles(params.workspacePath, filesToRead);
   const referencedFilesText = formatReferencedFiles(referencedFiles);
   const referencedFileNamesText = formatReferencedFileNames(referencedFiles);
+  recordSessionEvent(params.sessionId, 'referenced_files_read', {
+    files: referencedFiles.map((file) => ({
+      name: file.name,
+      path: file.path,
+      status: file.status,
+      originalHash: file.originalHash,
+      message: file.message
+    }))
+  });
   const userMessage = {
     id: createId('message'),
     session_id: params.sessionId,
@@ -934,7 +1206,11 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '用户显式引用的文件内容也会由系统读取后提供给你。',
               '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件。',
               '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
-              '当前阶段文件访问已全量放开。你可以基于系统真实定位结果和引用文件内容回答。',
+              '你不能直接修改文件，只能生成修改建议。',
+              '如果用户明确要求修改文件，首版只允许对一个已读取的引用文件生成完整新内容。',
+              '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
+              'JSON 字段必须是 filePath、originalHash、summary、nextContent。filePath 和 originalHash 必须来自已读取引用文件。',
+              '不要为多个文件生成建议，不要为未读取文件生成建议，不要生成 diff。',
               '',
               `当前工作区路径：${params.workspacePath ?? '未选择'}`,
               '用户消息路径定位结果：',
@@ -974,13 +1250,19 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       throw new Error('AI 返回内容为空');
     }
 
+    const fileEditSuggestion = parseFileEditSuggestion(content, referencedFiles, params.sessionId);
+    const displayContent = stripFileEditSuggestionBlock(content) || content;
     const assistantMessage = {
       id: createId('message'),
       session_id: params.sessionId,
       role: 'assistant' as const,
-      content,
+      content: displayContent,
       created_at: new Date().toISOString()
     };
+
+    if (fileEditSuggestion) {
+      fileEditSuggestion.messageId = assistantMessage.id;
+    }
 
     db.prepare(`
       INSERT INTO messages (id, session_id, role, content, created_at)
@@ -992,11 +1274,24 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       params.sessionId
     );
 
+    if (fileEditSuggestion) {
+      recordSessionEvent(params.sessionId, 'file_edit_suggested', {
+        suggestionId: fileEditSuggestion.id,
+        messageId: assistantMessage.id,
+        filePath: fileEditSuggestion.filePath,
+        fileName: fileEditSuggestion.fileName,
+        originalHash: fileEditSuggestion.originalHash,
+        proposedHash: fileEditSuggestion.proposedHash,
+        summary: fileEditSuggestion.summary
+      });
+    }
+
     return {
       userMessage: mapMessage(userMessage),
       assistantMessage: mapMessage(assistantMessage),
       locatedPaths: params.locatedPaths,
-      referencedFiles
+      referencedFiles,
+      fileEditSuggestion
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {

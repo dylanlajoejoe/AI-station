@@ -11,6 +11,7 @@ type ChatMessage = {
   role: 'user' | 'assistant';
   content: string;
   createdAt?: string;
+  fileEditSuggestionId?: string;
 };
 
 type FileTreeViewNode = FileTreeNode & {
@@ -43,6 +44,7 @@ type FilePreviewTab = {
   node: FileTreeNode;
   preview: FilePreviewState;
   draftContent: string;
+  originalHash: string;
   isDirty: boolean;
   isSaving: boolean;
   saveMessage: string;
@@ -75,6 +77,23 @@ function formatModifiedAt(value: string | null) {
   return new Date(value).toLocaleString('zh-CN', {
     hour12: false
   });
+}
+
+function isSensitiveFilePath(filePath: string) {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const segments = normalizedPath.split('/').filter(Boolean);
+  const sensitiveNames = new Set([
+    '.env',
+    '.env.local',
+    '.env.development',
+    '.env.production',
+    'credentials.json',
+    'secrets.json',
+    'id_rsa',
+    'id_ed25519'
+  ]);
+
+  return segments.some((segment) => segment.startsWith('.') || sensitiveNames.has(segment.toLowerCase()));
 }
 
 function formatLocatedPathSummary(results: LocatedPathResult[]) {
@@ -193,6 +212,8 @@ export function App() {
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const [openPreviewTabs, setOpenPreviewTabs] = useState<FilePreviewTab[]>([]);
   const [activePreviewTabId, setActivePreviewTabId] = useState<string | null>(null);
+  const [fileEditSuggestions, setFileEditSuggestions] = useState<FileEditSuggestion[]>([]);
+  const [applyingEditId, setApplyingEditId] = useState<string | null>(null);
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
   const visibleFileTree = filterTreeNodes(fileTree, fileSearchKeyword);
@@ -252,9 +273,51 @@ export function App() {
 
   const handleOpenSession = async (sessionId: string) => {
     const detail = await window.aiWorkspace.getSession({ sessionId });
+    const events = await window.aiWorkspace.getSessionEvents({ sessionId });
+    const appliedSuggestionIds = new Set(events
+      .filter((event) => event.type === 'file_edit_applied')
+      .map((event) => (event.payload as { suggestionId?: string }).suggestionId)
+      .filter(Boolean));
+    const restoredSuggestions = events.flatMap((event) => {
+      if (event.type !== 'file_edit_suggested') {
+        return [];
+      }
+
+      const payload = event.payload as {
+        suggestionId?: string;
+        messageId?: string;
+        filePath?: string;
+        fileName?: string;
+        originalHash?: string;
+        proposedHash?: string;
+        summary?: string;
+      };
+
+      if (!payload.suggestionId || !payload.filePath || !payload.fileName || !payload.originalHash || !payload.proposedHash || !payload.summary) {
+        return [];
+      }
+
+      return [{
+        id: payload.suggestionId,
+        sessionId,
+        filePath: payload.filePath,
+        fileName: payload.fileName,
+        originalHash: payload.originalHash,
+        proposedContent: '',
+        proposedHash: payload.proposedHash,
+        summary: payload.summary,
+        status: appliedSuggestionIds.has(payload.suggestionId) ? 'applied' as const : 'suggested' as const,
+        messageId: payload.messageId ?? null
+      }];
+    });
+
     setCurrentSession(detail.session);
     setCurrentDirectory(detail.session.workspacePath);
-    setMessages(detail.messages);
+    setMessages(detail.messages.map((message) => ({
+      ...message,
+      fileEditSuggestionId: restoredSuggestions.find((suggestion) => suggestion.messageId === message.id)?.id
+    })));
+    setFileEditSuggestions(restoredSuggestions);
   };
 
   const refreshSessions = async () => {
@@ -413,6 +476,7 @@ export function App() {
           node,
           preview: { status: 'loading', content: '', message: '正在读取文件内容...' },
           draftContent: '',
+          originalHash: '',
           isDirty: false,
           isSaving: false,
           saveMessage: ''
@@ -425,11 +489,20 @@ export function App() {
       setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === node.id
         ? {
           ...tab,
-          preview: { status: 'ready', content: result.content, message: '' },
+          preview: tab.isDirty ? tab.preview : { status: 'ready', content: result.content, message: '' },
           draftContent: tab.isDirty ? tab.draftContent : result.content,
-          saveMessage: ''
+          originalHash: tab.isDirty ? tab.originalHash : result.originalHash,
+          node: {
+            ...tab.node,
+            size: result.size,
+            modifiedAt: result.modifiedAt
+          },
+          saveMessage: tab.isDirty ? tab.saveMessage : ''
         }
         : tab));
+      setSelectedNode((currentNode) => currentNode?.id === node.id
+        ? { ...currentNode, size: result.size, modifiedAt: result.modifiedAt }
+        : currentNode);
     } catch (error) {
       setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === node.id
         ? {
@@ -461,36 +534,66 @@ export function App() {
   };
 
   const handleSavePreviewTab = async (tab: FilePreviewTab) => {
+    if (!currentDirectory) {
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+        ? { ...currentTab, saveMessage: '请先选择工作区目录' }
+        : currentTab));
+      return;
+    }
+
+    const sensitivePathConfirmed = isSensitiveFilePath(tab.node.path)
+      ? window.confirm(`文件“${tab.node.name}”位于隐藏或敏感路径，确认保存吗？`)
+      : false;
+
+    if (isSensitiveFilePath(tab.node.path) && !sensitivePathConfirmed) {
+      return;
+    }
+
+    const savedContent = tab.draftContent;
+
     setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
       ? { ...currentTab, isSaving: true, saveMessage: '保存中...' }
       : currentTab));
 
     try {
       const result = await window.aiWorkspace.saveTextFile({
+        workspacePath: currentDirectory,
         filePath: tab.node.path,
-        content: tab.draftContent
+        expectedOriginalHash: tab.originalHash,
+        content: savedContent,
+        sensitivePathConfirmed
       });
       setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
-        ? {
-          ...currentTab,
-          node: {
-            ...currentTab.node,
-            size: result.size,
-            modifiedAt: result.modifiedAt
-          },
-          preview: {
-            status: 'ready',
-            content: currentTab.draftContent,
-            message: ''
-          },
-          isDirty: false,
-          isSaving: false,
-          saveMessage: '已保存'
-        }
+        ? (() => {
+          const hasNewChanges = currentTab.draftContent !== savedContent;
+
+          return {
+            ...currentTab,
+            node: {
+              ...currentTab.node,
+              size: result.size,
+              modifiedAt: result.modifiedAt
+            },
+            preview: hasNewChanges ? currentTab.preview : {
+              status: 'ready',
+              content: savedContent,
+              message: ''
+            },
+            originalHash: hasNewChanges ? currentTab.originalHash : result.nextHash,
+            isDirty: hasNewChanges,
+            isSaving: false,
+            saveMessage: hasNewChanges ? '未保存' : '已保存'
+          };
+        })()
         : currentTab));
       setSelectedNode((currentNode) => currentNode?.id === tab.node.id
         ? { ...currentNode, size: result.size, modifiedAt: result.modifiedAt }
         : currentNode);
+      setFileTree((currentTree) => updateTreeNode(currentTree, tab.node.id, (currentNode) => ({
+        ...currentNode,
+        size: result.size,
+        modifiedAt: result.modifiedAt
+      })));
     } catch (error) {
       setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
         ? {
@@ -501,6 +604,28 @@ export function App() {
         : currentTab));
     }
   };
+
+  useEffect(() => {
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (!activePreviewTab?.isDirty || activePreviewTab.isSaving || activePreviewTab.preview.status !== 'ready') {
+        return;
+      }
+
+      void handleSavePreviewTab(activePreviewTab);
+    };
+
+    window.addEventListener('keydown', handleSaveShortcut);
+
+    return () => {
+      window.removeEventListener('keydown', handleSaveShortcut);
+    };
+  }, [activePreviewTab]);
 
   const handleClosePreviewTab = (nodeId: string) => {
     const tab = openPreviewTabs.find((previewTab) => previewTab.node.id === nodeId);
@@ -646,8 +771,14 @@ export function App() {
           ...result.userMessage,
           content: `${result.userMessage.content}${formatLocatedPathSummary(result.locatedPaths)}${formatReferencedFileSummary(result.referencedFiles)}`
         },
-        result.assistantMessage
+        {
+          ...result.assistantMessage,
+          fileEditSuggestionId: result.fileEditSuggestion?.id
+        }
       ]);
+      if (result.fileEditSuggestion) {
+        setFileEditSuggestions((currentSuggestions) => [...currentSuggestions, result.fileEditSuggestion as FileEditSuggestion]);
+      }
       void window.aiWorkspace.listSessions().then(setSessions);
     } catch (error) {
       setMessages((currentMessages) => [
@@ -660,6 +791,84 @@ export function App() {
       ]);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleApplyFileEdit = async (suggestion: FileEditSuggestion) => {
+    const dirtyTab = openPreviewTabs.find((tab) => tab.node.path === suggestion.filePath && tab.isDirty);
+
+    if (dirtyTab) {
+      window.alert('当前文件有未保存修改，请先保存或取消自己的修改后再应用 AI 修改。');
+      return;
+    }
+
+    if (!suggestion.proposedContent) {
+      window.alert('历史编辑建议无法直接应用，请重新生成修改建议。');
+      return;
+    }
+
+    const sensitivePathConfirmed = isSensitiveFilePath(suggestion.filePath)
+      ? window.confirm(`文件“${suggestion.fileName}”位于隐藏或敏感路径，确认应用 AI 修改吗？`)
+      : false;
+
+    if (isSensitiveFilePath(suggestion.filePath) && !sensitivePathConfirmed) {
+      return;
+    }
+
+    setApplyingEditId(suggestion.id);
+
+    try {
+      const result = await window.aiWorkspace.applyFileEdit({
+        sessionId: suggestion.sessionId,
+        suggestionId: suggestion.id,
+        filePath: suggestion.filePath,
+        expectedOriginalHash: suggestion.originalHash,
+        proposedContent: suggestion.proposedContent,
+        sensitivePathConfirmed,
+        summary: suggestion.summary
+      });
+
+      setFileEditSuggestions((currentSuggestions) => currentSuggestions.map((currentSuggestion) => currentSuggestion.id === suggestion.id
+        ? { ...currentSuggestion, status: 'applied' }
+        : currentSuggestion));
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.path === suggestion.filePath
+        ? {
+          ...tab,
+          node: {
+            ...tab.node,
+            size: result.size,
+            modifiedAt: result.modifiedAt
+          },
+          preview: {
+            status: 'ready',
+            content: suggestion.proposedContent,
+            message: ''
+          },
+          draftContent: suggestion.proposedContent,
+          originalHash: result.nextHash,
+          isDirty: false,
+          isSaving: false,
+          saveMessage: 'AI 修改已应用'
+        }
+        : tab));
+      setFileTree((currentTree) => updateTreeNode(currentTree, suggestion.filePath, (currentNode) => ({
+        ...currentNode,
+        size: result.size,
+        modifiedAt: result.modifiedAt
+      })));
+      setMessages((currentMessages) => [...currentMessages, {
+        id: `file-edit-applied-${Date.now()}`,
+        role: 'assistant',
+        content: `已应用 AI 修改：${suggestion.fileName}\n${suggestion.summary}`
+      }]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '应用 AI 修改失败';
+      setFileEditSuggestions((currentSuggestions) => currentSuggestions.map((currentSuggestion) => currentSuggestion.id === suggestion.id
+        ? { ...currentSuggestion, status: 'failed' }
+        : currentSuggestion));
+      window.alert(message);
+    } finally {
+      setApplyingEditId(null);
     }
   };
 
@@ -750,6 +959,39 @@ export function App() {
         <button className="context-menu-item primary" onClick={() => void handleRenameSession(sessionContextMenu.session)}>重命名会话</button>
         <button className="context-menu-item primary" onClick={() => void handleExportSession(sessionContextMenu.session)}>导出为 Markdown</button>
         <button className="context-menu-item danger" onClick={() => void handleDeleteSession(sessionContextMenu.session)}>删除会话</button>
+      </div>
+    );
+  };
+
+  const renderFileEditSuggestion = (suggestionId: string | undefined) => {
+    if (!suggestionId) {
+      return null;
+    }
+
+    const suggestion = fileEditSuggestions.find((currentSuggestion) => currentSuggestion.id === suggestionId);
+
+    if (!suggestion) {
+      return null;
+    }
+
+    const isApplied = suggestion.status === 'applied';
+    const isFailed = suggestion.status === 'failed';
+
+    return (
+      <div className="file-edit-suggestion">
+        <div className="file-edit-suggestion-header">
+          <strong>AI 文件修改建议</strong>
+          <span>{isApplied ? '已应用' : isFailed ? '应用失败' : '待确认'}</span>
+        </div>
+        <div className="file-edit-suggestion-path" title={suggestion.filePath}>{suggestion.fileName}</div>
+        <p>{suggestion.summary}</p>
+        <button
+          disabled={isApplied || applyingEditId === suggestion.id || !suggestion.proposedContent}
+          onClick={() => void handleApplyFileEdit(suggestion)}
+          type="button"
+        >
+          {applyingEditId === suggestion.id ? '应用中' : isApplied ? '已应用' : '应用修改'}
+        </button>
       </div>
     );
   };
@@ -996,6 +1238,7 @@ export function App() {
                 key={message.id}
               >
                 {message.role === 'assistant' ? <MarkdownMessage content={message.content} /> : message.content}
+                {message.role === 'assistant' && renderFileEditSuggestion(message.fileEditSuggestionId)}
               </div>
             ))}
             {isSending && <div className="message ai-message">AI 正在回复...</div>}

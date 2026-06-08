@@ -16,11 +16,45 @@ type ChatMessageInput = {
 
 type TextPreviewResult = {
   content: string;
+  originalHash: string;
+  size: number;
+  modifiedAt: string;
 };
 
 type SaveTextResult = {
   size: number;
   modifiedAt: string;
+  nextHash: string;
+};
+
+type FileEditSuggestion = {
+  id: string;
+  sessionId: string;
+  filePath: string;
+  fileName: string;
+  originalHash: string;
+  proposedContent: string;
+  proposedHash: string;
+  summary: string;
+  status: 'suggested' | 'applied' | 'failed';
+  messageId: string | null;
+};
+
+type ApplyFileEditResult = {
+  ok: boolean;
+  filePath: string;
+  size: number;
+  modifiedAt: string;
+  nextHash: string;
+  logId: string;
+};
+
+type SessionEventRecord = {
+  id: string;
+  sessionId: string;
+  type: string;
+  payload: unknown;
+  createdAt: string;
 };
 
 type SessionRecord = {
@@ -68,6 +102,7 @@ type ReferencedFileContent = {
   path: string;
   status: 'read' | 'skipped';
   content: string | null;
+  originalHash: string | null;
   message: string;
 };
 
@@ -86,9 +121,21 @@ interface Window {
     listFileTree: (directoryPath: string) => Promise<FileTreeNode[]>;
     readTextPreview: (filePath: string) => Promise<TextPreviewResult>;
     saveTextFile: (params: {
+      workspacePath: string | null;
       filePath: string;
+      expectedOriginalHash: string;
       content: string;
+      sensitivePathConfirmed: boolean;
     }) => Promise<SaveTextResult>;
+    applyFileEdit: (params: {
+      sessionId: string;
+      suggestionId: string;
+      filePath: string;
+      expectedOriginalHash: string;
+      proposedContent: string;
+      sensitivePathConfirmed: boolean;
+      summary: string;
+    }) => Promise<ApplyFileEditResult>;
     locatePaths: (params: {
       workspacePath: string | null;
       content: string;
@@ -105,6 +152,7 @@ interface Window {
       assistantMessage: ChatMessageRecord;
       locatedPaths: LocatedPathResult[];
       referencedFiles: ReferencedFileContent[];
+      fileEditSuggestion: FileEditSuggestion | null;
     }>;
     onMessageChunk: (callback: (chunk: MessageChunk) => void) => () => void;
     createSession: (params: {
@@ -117,6 +165,9 @@ interface Window {
       session: SessionRecord;
       messages: ChatMessageRecord[];
     }>;
+    getSessionEvents: (params: {
+      sessionId: string;
+    }) => Promise<SessionEventRecord[]>;
     renameSession: (params: {
       sessionId: string;
       title: string;
