@@ -621,16 +621,58 @@ textarea:focus-visible {
 
 .session-list-box {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   flex: 0 0 auto;
   gap: 6px;
-  margin-top: 16px;
-  max-height: 210px;
+  margin-top: 6px;
   min-height: 0;
   overflow: hidden;
 }
 
+.session-list-box.collapsed {
+  display: block;
+  height: auto;
+  margin-top: 16px;
+  max-height: none;
+}
+
+.session-resize-handle {
+  flex: 0 0 8px;
+  margin: 8px 0 2px;
+  border-radius: 999px;
+  cursor: row-resize;
+}
+
+.session-resize-handle:hover {
+  background: rgba(23, 74, 92, 0.14);
+}
+
+.session-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .session-list-box .panel-title {
   margin-bottom: 0;
+}
+
+.collapse-session-button {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #fffdf8;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.collapse-session-button:hover {
+  border-color: #b9d0c6;
+  color: var(--green);
 }
 
 .session-list {

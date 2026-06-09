@@ -129,10 +129,10 @@ function getFileCapability(node: FileTreeNode) {
       : { label: '可编辑', tone: 'editable', detail: '文本文件可预览、编辑，也可读取给 AI。' };
   }
 
-  if (readonlyExtensions.has(extension)) {
+    if (readonlyExtensions.has(extension)) {
     return size > 10 * 1024 * 1024
       ? { label: '过大', tone: 'warning', detail: '文档超过 10MB，暂不提取文本。' }
-      : { label: '只读', tone: 'readonly', detail: '文档可提取文本给 AI，但不能直接编辑保存。' };
+      : { label: '只读', tone: 'readonly', detail: '文档可提取文本给 AI，首次提取较慢，后续会复用缓存。' };
   }
 
   return { label: '不支持', tone: 'unsupported', detail: '该格式暂不支持读取内容，可转换为 txt、md、docx、xlsx、pptx 或 pdf 后再使用。' };
@@ -142,7 +142,7 @@ function getReadLoadingMessage(node: FileTreeNode) {
   const capability = getFileCapability(node);
 
   if (capability.tone === 'readonly') {
-    return '正在提取文档文本，Office/PDF 文件可能需要稍等...';
+    return '正在提取文档文本，Office/PDF 首次解析可能较慢，之后会复用缓存...';
   }
 
   if (capability.tone === 'warning' || capability.tone === 'unsupported') {
@@ -368,6 +368,8 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [currentSession, setCurrentSession] = useState<SessionRecord | null>(null);
+  const [isSessionListCollapsed, setIsSessionListCollapsed] = useState(false);
+  const [sessionListHeight, setSessionListHeight] = useState(210);
   const [isSending, setIsSending] = useState(false);
   const [streamingSessionId, setStreamingSessionId] = useState<string | null>(null);
   const [aiBaseUrl, setAiBaseUrl] = useState('');
@@ -558,6 +560,18 @@ export function App() {
 
     setCurrentSession(detail.session);
     setCurrentDirectory(detail.session.workspacePath);
+    setFileTreeError(null);
+    if (detail.session.workspacePath) {
+      try {
+        const nodes = await window.aiWorkspace.listFileTree(detail.session.workspacePath);
+        setFileTree(nodes);
+      } catch {
+        setFileTree([]);
+        setFileTreeError('目录读取失败，请确认路径是否存在');
+      }
+    } else {
+      setFileTree([]);
+    }
     setMessages(detail.messages.map((message) => ({
       ...message,
       fileEditSuggestionId: restoredSuggestions.find((suggestion) => suggestion.messageId === message.id)?.id
@@ -702,7 +716,27 @@ export function App() {
     window.addEventListener('pointerup', handlePointerUp);
   };
 
+  const handleResizeSessionList = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const startY = event.clientY;
+    const startHeight = sessionListHeight;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextHeight = Math.min(360, Math.max(88, startHeight + startY - moveEvent.clientY));
+      setSessionListHeight(nextHeight);
+    };
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  };
+
   const handleSelectDirectory = async () => {
+    setWorkspaceContextMenu(null);
     const result = await window.aiWorkspace.selectDirectory();
 
     if (!result.canceled && result.path) {
@@ -732,8 +766,16 @@ export function App() {
 
     setActivePreviewTabId(node.id);
     setOpenPreviewTabs((currentTabs) => {
-      if (currentTabs.some((tab) => tab.node.id === node.id)) {
-        return currentTabs;
+      const existingTab = currentTabs.find((tab) => tab.node.id === node.id);
+
+      if (existingTab) {
+        return currentTabs.map((tab) => tab.node.id === node.id && tab.preview.status !== 'ready'
+          ? {
+            ...tab,
+            preview: { status: 'loading', content: '', message: getReadLoadingMessage(node) },
+            saveMessage: ''
+          }
+          : tab);
       }
 
       return [
@@ -967,15 +1009,11 @@ export function App() {
   const handleWorkspaceContextMenu = (event: ReactMouseEvent) => {
     event.preventDefault();
 
-    if (!currentDirectory) {
-      return;
-    }
-
     setContextMenu(null);
     setSessionContextMenu(null);
     setPreviewContextMenu(null);
     setOpenTopMenu(null);
-    const position = getContextMenuPosition(event.clientX, event.clientY, 2);
+    const position = getContextMenuPosition(event.clientX, event.clientY, currentDirectory ? 2 : 1);
 
     setWorkspaceContextMenu(position);
   };
@@ -987,6 +1025,21 @@ export function App() {
 
     const nodes = await window.aiWorkspace.listFileTree(currentDirectory);
     setFileTree(nodes);
+  };
+
+  const refreshFileTreeBranch = async (parentPath: string | null) => {
+    if (!parentPath) {
+      await refreshFileTree();
+      return;
+    }
+
+    const nodes = await window.aiWorkspace.listFileTree(parentPath);
+    setFileTree((currentTree) => updateTreeNode(currentTree, parentPath, (node) => ({
+      ...node,
+      children: nodes,
+      isExpanded: true,
+      isLoading: false
+    })));
   };
 
   const openCreateEntryDialog = (type: 'file' | 'directory', parentPath: string | null = null) => {
@@ -1012,8 +1065,13 @@ export function App() {
     }
 
     try {
-      const createdEntry = await window.aiWorkspace.createWorkspaceEntry({ type, name: name.trim(), parentPath });
-      await refreshFileTree();
+      const createdEntry = await window.aiWorkspace.createWorkspaceEntry({
+        type,
+        name: name.trim(),
+        parentPath,
+        workspacePath: currentDirectory
+      });
+      await refreshFileTreeBranch(parentPath);
       setSelectedNode(createdEntry);
 
       if (createdEntry.type === 'file') {
@@ -1087,18 +1145,20 @@ export function App() {
   };
 
   const handleFileContextMenuAction = async (item: string, node: FileTreeNode) => {
+    const createParentPath = node.type === 'directory' ? node.path : null;
+
     if (item === '添加到引用文件') {
       handleAddToChat(node);
       return;
     }
 
     if (item === '新建文件') {
-      openCreateEntryDialog('file', node.path);
+      openCreateEntryDialog('file', createParentPath);
       return;
     }
 
     if (item === '新建文件夹') {
-      openCreateEntryDialog('directory', node.path);
+      openCreateEntryDialog('directory', createParentPath);
       return;
     }
 
@@ -1451,11 +1511,13 @@ export function App() {
       return;
     }
 
-    const sensitivePathConfirmed = isSensitiveFilePath(suggestion.filePath)
+    const isSensitiveSuggestionPath = isSensitiveFilePath(suggestion.filePath)
+      || (suggestion.targetPath ? isSensitiveFilePath(suggestion.targetPath) : false);
+    const sensitivePathConfirmed = isSensitiveSuggestionPath
       ? window.confirm(`文件“${suggestion.fileName}”位于隐藏或敏感路径，确认${suggestion.operation === 'delete' ? '删除' : suggestion.operation === 'rename' ? '重命名' : '应用'}吗？`)
       : false;
 
-    if (isSensitiveFilePath(suggestion.filePath) && !sensitivePathConfirmed) {
+    if (isSensitiveSuggestionPath && !sensitivePathConfirmed) {
       return;
     }
 
@@ -1701,8 +1763,14 @@ export function App() {
         onClick={(event) => event.stopPropagation()}
         style={{ left: workspaceContextMenu.x, top: workspaceContextMenu.y }}
       >
-        <button className="context-menu-item primary" onClick={() => openCreateEntryDialog('file')}>新建文件</button>
-        <button className="context-menu-item primary" onClick={() => openCreateEntryDialog('directory')}>新建文件夹</button>
+        {currentDirectory ? (
+          <>
+            <button className="context-menu-item primary" onClick={() => openCreateEntryDialog('file')}>新建文件</button>
+            <button className="context-menu-item primary" onClick={() => openCreateEntryDialog('directory')}>新建文件夹</button>
+          </>
+        ) : (
+          <button className="context-menu-item primary" onClick={() => void handleSelectDirectory()}>选择目录</button>
+        )}
       </div>
     );
   };
@@ -1885,22 +1953,45 @@ export function App() {
             )}
             {renderFileTreeNodes(visibleFileTree)}
           </nav>
-          <div className="session-list-box">
-            <div className="panel-title">历史会话</div>
-            <div className="session-list">
-              {sessions.length === 0 && <div className="folder-empty">暂无历史会话</div>}
-              {sessions.map((session) => (
-                <button
-                  className={currentSession?.id === session.id ? 'session-item active' : 'session-item'}
-                  key={session.id}
-                  onClick={() => void handleOpenSession(session.id)}
-                  onContextMenu={(event) => handleSessionContextMenu(event, session)}
-                >
-                  <span>{session.title}</span>
-                  <small>{new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small>
-                </button>
-              ))}
+          {!isSessionListCollapsed && (
+            <div
+              aria-label="调整历史会话高度"
+              className="session-resize-handle"
+              onPointerDown={handleResizeSessionList}
+              role="separator"
+            />
+          )}
+          <div
+            className={isSessionListCollapsed ? 'session-list-box collapsed' : 'session-list-box'}
+            style={isSessionListCollapsed ? undefined : { height: sessionListHeight }}
+          >
+            <div className="session-list-header">
+              <div className="panel-title">历史会话</div>
+              <button
+                aria-expanded={!isSessionListCollapsed}
+                className="collapse-session-button"
+                onClick={() => setIsSessionListCollapsed((isCollapsed) => !isCollapsed)}
+                type="button"
+              >
+                {isSessionListCollapsed ? '展开' : '收起'}
+              </button>
             </div>
+            {!isSessionListCollapsed && (
+              <div className="session-list">
+                {sessions.length === 0 && <div className="folder-empty">暂无历史会话</div>}
+                {sessions.map((session) => (
+                  <button
+                    className={currentSession?.id === session.id ? 'session-item active' : 'session-item'}
+                    key={session.id}
+                    onClick={() => void handleOpenSession(session.id)}
+                    onContextMenu={(event) => handleSessionContextMenu(event, session)}
+                  >
+                    <span>{session.title}</span>
+                    <small>{new Date(session.updatedAt).toLocaleString('zh-CN', { hour12: false })}</small>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </aside>
         <div className="resize-handle" onPointerDown={handleResizeFolderPanel} />

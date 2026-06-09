@@ -11,6 +11,8 @@ import { compressTranscript, type CompressionInputMessage, type CompressionResul
 const isDev = !app.isPackaged;
 const maxPreviewFileSize = 1024 * 1024;
 const maxOfficePreviewFileSize = 10 * 1024 * 1024;
+const officeReadTimeoutMs = 20000;
+const officeOcrTimeoutMs = 90000;
 const previewableTextExtensions = new Set([
   '.txt',
   '.md',
@@ -56,6 +58,16 @@ type ReferencedFileContent = {
   content: string | null;
   originalHash: string | null;
   message: string;
+};
+
+type PreviewableFileResult = {
+  content: string;
+  originalHash: string;
+  size: number;
+  modifiedAt: string;
+  isEditable: boolean;
+  contentKind: 'text' | 'office';
+  ocrEnabled: boolean;
 };
 
 type SaveTextFileParams = {
@@ -139,6 +151,7 @@ type CreateWorkspaceEntryParams = {
   type: 'file' | 'directory';
   name: string;
   parentPath?: string | null;
+  workspacePath?: string | null;
 };
 
 type SessionEventRow = {
@@ -275,6 +288,7 @@ let workspaceWatcher: ReturnType<typeof watch> | null = null;
 let workspaceChangeTimer: NodeJS.Timeout | null = null;
 let mainWindowRef: BrowserWindow | null = null;
 const activeChatControllers = new Map<string, AbortController>();
+const previewCache = new Map<string, PreviewableFileResult>();
 
 function normalizeAiConfig(config: Partial<AiConfig>): Partial<AiConfig> {
   return {
@@ -1003,14 +1017,32 @@ async function readDocText(filePath: string) {
   ].filter(Boolean).join('\n\n').trim();
 }
 
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: NodeJS.Timeout | null = null;
+
+  try {
+    return await Promise.race([
+      task,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 async function readOfficeText(filePath: string, enableOcr: boolean) {
   const extension = path.extname(filePath).toLowerCase();
+  const timeoutMs = enableOcr ? officeOcrTimeoutMs : officeReadTimeoutMs;
 
   if (extension === '.doc') {
-    return readDocText(filePath);
+    return withTimeout(readDocText(filePath), timeoutMs, 'Office 文件文本提取超时');
   }
 
-  const ast = await OfficeParser.parseOffice(filePath, {
+  const ast = await withTimeout(OfficeParser.parseOffice(filePath, {
     ocr: enableOcr,
     ocrConfig: enableOcr ? {
       language: 'chi_sim+eng',
@@ -1022,10 +1054,14 @@ async function readOfficeText(filePath: string, enableOcr: boolean) {
     } : undefined,
     ignoreComments: true,
     ignoreHeadersAndFooters: false
-  });
-  const result = await ast.to('text');
+  }), timeoutMs, enableOcr ? 'Office/PDF OCR 解析超时' : 'Office/PDF 文本解析超时');
+  const result = await withTimeout(ast.to('text'), timeoutMs, enableOcr ? 'Office/PDF OCR 提取超时' : 'Office/PDF 文本提取超时');
 
   return typeof result.value === 'string' ? result.value.trim() : '';
+}
+
+function getPreviewCacheKey(filePath: string, size: number, modifiedAt: string, enableOcr: boolean) {
+  return `${path.resolve(filePath)}::${size}::${modifiedAt}::${enableOcr ? 'ocr' : 'text'}`;
 }
 
 function isSensitivePath(workspacePath: string, targetPath: string) {
@@ -1059,7 +1095,7 @@ async function assertEditableTextFile(filePath: string) {
   return fileStat;
 }
 
-async function readPreviewableFile(filePath: string, enableOcr = false) {
+async function readPreviewableFile(filePath: string, enableOcr = false): Promise<PreviewableFileResult> {
   const fileStat = await stat(filePath);
 
   if (!fileStat.isFile()) {
@@ -1067,6 +1103,7 @@ async function readPreviewableFile(filePath: string, enableOcr = false) {
   }
 
   const contentKind = getFileContentKind(filePath);
+  const modifiedAt = fileStat.mtime.toISOString();
 
   if (contentKind === 'text') {
     if (fileStat.size > maxPreviewFileSize) {
@@ -1079,7 +1116,7 @@ async function readPreviewableFile(filePath: string, enableOcr = false) {
       content,
       originalHash: hashTextContent(content),
       size: fileStat.size,
-      modifiedAt: fileStat.mtime.toISOString(),
+      modifiedAt,
       isEditable: true,
       contentKind,
       ocrEnabled: false
@@ -1091,21 +1128,32 @@ async function readPreviewableFile(filePath: string, enableOcr = false) {
       throw new Error('Office 文件超过 10MB，暂不支持读取');
     }
 
+    const cacheKey = getPreviewCacheKey(filePath, fileStat.size, modifiedAt, enableOcr);
+    const cachedPreview = previewCache.get(cacheKey);
+
+    if (cachedPreview) {
+      return cachedPreview;
+    }
+
     const content = await readOfficeText(filePath, enableOcr);
 
     if (!content) {
       throw new Error('未能从该 Office 文件提取到文本内容');
     }
 
-    return {
+    const preview = {
       content,
       originalHash: hashTextContent(content),
       size: fileStat.size,
-      modifiedAt: fileStat.mtime.toISOString(),
+      modifiedAt,
       isEditable: false,
       contentKind,
       ocrEnabled: enableOcr
     };
+
+    previewCache.set(cacheKey, preview);
+
+    return preview;
   }
 
   throw new Error('该文件类型暂不支持读取');
@@ -1286,6 +1334,10 @@ async function renameWorkspaceEntry(params: { filePath: string; targetPath: stri
 }
 
 async function createWorkspaceEntry(params: CreateWorkspaceEntryParams) {
+  if (params.workspacePath) {
+    await setTrustedWorkspacePath(params.workspacePath);
+  }
+
   const workspacePath = await getTrustedWorkspacePath();
   const parentPath = params.parentPath ? path.resolve(params.parentPath) : workspacePath;
   const normalizedName = params.type === 'file' && !path.extname(params.name.trim())
@@ -1379,10 +1431,83 @@ function extractPathCandidates(content: string) {
   return Array.from(candidates).filter(Boolean).slice(0, 20);
 }
 
+function extractFileNameCandidates(content: string) {
+  const extensionPattern = Array.from(new Set([...previewableTextExtensions, ...previewableOfficeExtensions]))
+    .map((extension) => extension.replace('.', '\\.'))
+    .join('|');
+  const fileNamePattern = new RegExp(`[^\\s"'“”‘’<>|/\\\\]+(?:${extensionPattern})`, 'gi');
+
+  return Array.from(new Set((content.match(fileNamePattern) ?? []).map(normalizePathCandidate))).slice(0, 20);
+}
+
+async function findWorkspaceFilesByName(workspacePath: string, targetName: string) {
+  const matches: LocatedPathResult[] = [];
+  const normalizedTargetName = targetName.toLowerCase();
+  const maxMatches = 20;
+
+  async function walk(directoryPath: string) {
+    if (matches.length >= maxMatches) {
+      return;
+    }
+
+    let directoryEntries;
+
+    try {
+      directoryEntries = await readdir(directoryPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of directoryEntries) {
+      if (shouldHideEntry(entry.name, entry.isDirectory())) {
+        continue;
+      }
+
+      const entryPath = path.join(directoryPath, entry.name);
+
+      if (entry.isFile() && entry.name.toLowerCase() === normalizedTargetName) {
+        try {
+          const entryStat = await stat(entryPath);
+          matches.push({
+            input: targetName,
+            status: 'found',
+            path: entryPath,
+            name: entry.name,
+            type: 'file',
+            size: entryStat.size,
+            modifiedAt: entryStat.mtime.toISOString(),
+            message: '已按文件名在当前工作区唯一定位'
+          });
+        } catch {
+          matches.push({
+            input: targetName,
+            status: 'not_found',
+            path: entryPath,
+            name: entry.name,
+            type: null,
+            size: null,
+            modifiedAt: null,
+            message: '按文件名定位到候选项，但无法读取文件状态'
+          });
+        }
+      }
+
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+      }
+    }
+  }
+
+  await walk(workspacePath);
+
+  return matches;
+}
+
 async function locatePathsInWorkspace(workspacePath: string | null, content: string): Promise<LocatedPathResult[]> {
 
   const candidates = extractPathCandidates(content);
   const results: LocatedPathResult[] = [];
+  const seenInputs = new Set(candidates.map((candidate) => candidate.toLowerCase()));
 
   for (const candidate of candidates) {
     const targetPath = path.isAbsolute(candidate) ? candidate : path.join(workspacePath ?? process.cwd(), candidate);
@@ -1413,6 +1538,31 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
         modifiedAt: null,
         message: '当前工作区内未找到该路径'
       });
+    }
+  }
+
+  if (workspacePath) {
+    for (const fileName of extractFileNameCandidates(content)) {
+      if (seenInputs.has(fileName.toLowerCase())) {
+        continue;
+      }
+
+      const matches = await findWorkspaceFilesByName(workspacePath, fileName);
+
+      if (matches.length === 1 && matches[0].status === 'found') {
+        results.push(matches[0]);
+      } else if (matches.length > 1) {
+        results.push({
+          input: fileName,
+          status: 'not_found',
+          path: null,
+          name: fileName,
+          type: null,
+          size: null,
+          modifiedAt: null,
+          message: `当前工作区内存在 ${matches.length} 个同名文件，请提供更具体路径`
+        });
+      }
     }
   }
 
@@ -1523,7 +1673,7 @@ async function readReferencedFiles(
 
 function formatReferencedFiles(files: ReferencedFileContent[]) {
   if (files.length === 0) {
-    return '用户未引用文件。';
+    return '本轮未读取到相关文件。';
   }
 
   return files.map((file) => {
@@ -1603,6 +1753,28 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
     };
   }
 
+  if (candidate.operation === 'rename') {
+    if (typeof candidate.targetPath !== 'string') {
+      return null;
+    }
+
+    return {
+      id: createId('file-edit'),
+      sessionId,
+      operation: 'rename',
+      filePath: candidate.filePath,
+      targetPath: candidate.targetPath,
+      fileName: path.basename(candidate.filePath),
+      originalHash: null,
+      originalContent: null,
+      proposedContent: null,
+      proposedHash: null,
+      summary: candidate.summary.slice(0, 500),
+      status: 'suggested',
+      messageId: null
+    };
+  }
+
   if (typeof candidate.originalHash !== 'string') {
     return null;
   }
@@ -1622,28 +1794,6 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
       operation: 'delete',
       filePath: file.path,
       targetPath: null,
-      fileName: file.name,
-      originalHash: candidate.originalHash,
-      originalContent: file.content,
-      proposedContent: null,
-      proposedHash: null,
-      summary: candidate.summary.slice(0, 500),
-      status: 'suggested',
-      messageId: null
-    };
-  }
-
-  if (candidate.operation === 'rename') {
-    if (typeof candidate.targetPath !== 'string') {
-      return null;
-    }
-
-    return {
-      id: createId('file-edit'),
-      sessionId,
-      operation: 'rename',
-      filePath: file.path,
-      targetPath: candidate.targetPath,
       fileName: file.name,
       originalHash: candidate.originalHash,
       originalContent: file.content,
@@ -2517,17 +2667,17 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
             content: [
               '你是一个桌面 AI 助手。',
               '你可以看到用户已选择工作区的目录结构摘要，包括文件名、文件夹名、大小和修改时间。',
-              '如果用户消息里包含路径，系统会真实定位路径；定位到的文本文件会自动读取内容并提供给你。',
-              '用户显式引用的文件内容会由系统读取后提供给你；历史引用文件会根据当前问题自动匹配并重新读取。',
-              '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件。',
-              '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
+              '如果用户消息里包含路径，系统会真实定位路径；定位到的文本、Office、PDF 文件会自动读取或提取文本并提供给你。',
+              '用户显式引用的文件内容会由系统读取后提供给你；用户消息语义里能唯一定位到的文件会自动读取内容；历史引用文件会根据当前问题自动匹配并重新读取。',
+              '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件；如果 Office/PDF 提取成功，就直接基于提取文本回答，不要说二进制文件无法读取。',
+              '如果用户语义能明确指向某个文件，不要要求用户再引用；只有无法唯一定位文件或文件内容未提供时，才要求用户提供更具体路径、引用文件或粘贴内容。',
               '你不能直接修改文件，只能生成修改建议。',
               '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
               'JSON 字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete、rename。',
-              'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自已读取引用文件。',
+              'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
               'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自已读取引用文件。',
-              'rename 必须包含 originalHash、targetPath，且 filePath 和 originalHash 必须来自已读取引用文件。',
+              'rename 只需要包含 targetPath；filePath 必须来自用户消息路径定位结果或已读取引用文件，不需要 originalHash 或文件内容。',
               'create 必须包含 nextContent，filePath 必须在当前工作区内且是文本文件路径。',
               '不要一次生成多个文件操作，不要生成 diff。删除文件必须等待用户确认，重命名文件可直接生成建议。',
               '系统会提供当前会话 Memory。Memory 只是辅助上下文；如果 Memory 与当前用户消息或当前文件内容冲突，以当前用户消息和当前文件内容为准。',
