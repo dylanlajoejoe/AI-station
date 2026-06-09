@@ -2215,6 +2215,42 @@ ipcMain.handle('fileTree:createEntry', async (_event, params: CreateWorkspaceEnt
   return createWorkspaceEntry(params);
 });
 
+ipcMain.handle('fileTree:renameEntry', async (_event, params: { filePath: string; newName: string }) => {
+  const trimmedName = params.newName.trim();
+
+  if (!trimmedName) {
+    throw new Error('请输入新名称');
+  }
+
+  if (path.isAbsolute(trimmedName) || trimmedName.includes('/') || trimmedName.includes('\\')) {
+    throw new Error('名称不能包含路径分隔符');
+  }
+
+  const targetPath = path.join(path.dirname(params.filePath), trimmedName);
+  const sourceStat = await stat(params.filePath);
+  const workspacePath = await getTrustedWorkspacePath();
+
+  if (isSensitivePath(workspacePath, params.filePath) || isSensitivePath(workspacePath, targetPath)) {
+    throw new Error('隐藏或敏感路径暂不支持直接重命名');
+  }
+
+  const result = await renameWorkspaceEntry({
+    filePath: params.filePath,
+    targetPath,
+    expectedOriginalHash: null,
+    sensitivePathConfirmed: false
+  });
+
+  return {
+    id: targetPath,
+    name: path.basename(targetPath),
+    path: targetPath,
+    type: sourceStat.isDirectory() ? 'directory' : 'file',
+    size: sourceStat.isDirectory() ? null : result.size,
+    modifiedAt: result.modifiedAt
+  };
+});
+
 ipcMain.handle('file:readTextPreview', async (_event, params: string | { filePath: string; enableOcr?: boolean }) => {
   const filePath = typeof params === 'string' ? params : params.filePath;
   const enableOcr = typeof params === 'string' ? false : Boolean(params.enableOcr);

@@ -164,6 +164,10 @@ interface Window {
       type: 'file' | 'directory';
       name: string;
     }) => Promise<FileTreeNode>;
+    renameWorkspaceEntry: (params: {
+      filePath: string;
+      newName: string;
+    }) => Promise<FileTreeNode>;
     readTextPreview: (params: string | {
       filePath: string;
       enableOcr?: boolean;

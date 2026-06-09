@@ -37,6 +37,12 @@ type WorkspaceContextMenuState = {
   y: number;
 } | null;
 
+type PreviewContextMenuState = {
+  x: number;
+  y: number;
+  tab: FilePreviewTab;
+} | null;
+
 type TopMenuKey = 'file' | 'edit';
 
 type FilePreviewState = {
@@ -61,6 +67,9 @@ type FilePreviewTab = {
 
 const fileContextMenuItems = ['添加到引用文件', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
 const directoryContextMenuItems = ['添加到引用文件', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
+const enabledFileContextMenuItems = new Set(['添加到引用文件', '复制文件名', '复制路径', '重命名']);
+const enabledDirectoryContextMenuItems = new Set(['添加到引用文件', '复制文件夹名', '复制路径', '重命名']);
+const previewContextMenuItems = ['添加到引用文件', '复制文件名', '复制路径', '重命名'];
 const editableExtensions = new Set(['.txt', '.md', '.csv', '.json', '.ts', '.tsx', '.js', '.jsx', '.css', '.html', '.htm', '.xml', '.yaml', '.yml', '.log']);
 const readonlyExtensions = new Set(['.doc', '.docx', '.xlsx', '.ppt', '.pptx', '.pdf']);
 
@@ -164,6 +173,17 @@ function buildChangePreview(before: string | null, after: string | null) {
   return {
     before: `${beforeStart > 0 ? '...\n' : ''}${before.slice(beforeStart, beforeEnd)}${beforeEnd < before.length ? '\n...' : ''}`,
     after: `${afterStart > 0 ? '...\n' : ''}${after.slice(afterStart, afterEnd)}${afterEnd < after.length ? '\n...' : ''}`
+  };
+}
+
+function getContextMenuPosition(x: number, y: number, itemCount: number) {
+  const menuWidth = 190;
+  const menuHeight = itemCount * 38 + 16;
+  const padding = 8;
+
+  return {
+    x: Math.min(x, window.innerWidth - menuWidth - padding),
+    y: Math.min(y, window.innerHeight - menuHeight - padding)
   };
 }
 
@@ -352,6 +372,7 @@ export function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] = useState<WorkspaceContextMenuState>(null);
+  const [previewContextMenu, setPreviewContextMenu] = useState<PreviewContextMenuState>(null);
   const [openTopMenu, setOpenTopMenu] = useState<TopMenuKey | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const [openPreviewTabs, setOpenPreviewTabs] = useState<FilePreviewTab[]>([]);
@@ -398,6 +419,7 @@ export function App() {
       setContextMenu(null);
       setSessionContextMenu(null);
       setWorkspaceContextMenu(null);
+      setPreviewContextMenu(null);
       setOpenTopMenu(null);
     };
 
@@ -538,9 +560,15 @@ export function App() {
 
   const handleSessionContextMenu = (event: ReactMouseEvent, session: SessionRecord) => {
     event.preventDefault();
+    setContextMenu(null);
+    setWorkspaceContextMenu(null);
+    setPreviewContextMenu(null);
+    setOpenTopMenu(null);
+    const position = getContextMenuPosition(event.clientX, event.clientY, 4);
+
     setSessionContextMenu({
-      x: event.clientX,
-      y: event.clientY,
+      x: position.x,
+      y: position.y,
       session
     });
   };
@@ -553,11 +581,15 @@ export function App() {
       return;
     }
 
-    await window.aiWorkspace.renameSession({ sessionId: session.id, title });
-    if (currentSession?.id === session.id) {
-      setCurrentSession({ ...session, title: title.trim() });
+    try {
+      await window.aiWorkspace.renameSession({ sessionId: session.id, title });
+      if (currentSession?.id === session.id) {
+        setCurrentSession({ ...session, title: title.trim() });
+      }
+      await refreshSessions();
+    } catch (error) {
+      window.alert(getFriendlyErrorMessage(error, '重命名会话失败'));
     }
-    await refreshSessions();
     setSessionContextMenu(null);
   };
 
@@ -928,9 +960,16 @@ export function App() {
     event.preventDefault();
     event.stopPropagation();
     setSelectedNode(node);
+    setSessionContextMenu(null);
+    setWorkspaceContextMenu(null);
+    setPreviewContextMenu(null);
+    setOpenTopMenu(null);
+    const itemCount = node.type === 'directory' ? directoryContextMenuItems.length : fileContextMenuItems.length;
+    const position = getContextMenuPosition(event.clientX, event.clientY, itemCount);
+
     setContextMenu({
-      x: event.clientX,
-      y: event.clientY,
+      x: position.x,
+      y: position.y,
       node
     });
   };
@@ -942,10 +981,13 @@ export function App() {
       return;
     }
 
-    setWorkspaceContextMenu({
-      x: event.clientX,
-      y: event.clientY
-    });
+    setContextMenu(null);
+    setSessionContextMenu(null);
+    setPreviewContextMenu(null);
+    setOpenTopMenu(null);
+    const position = getContextMenuPosition(event.clientX, event.clientY, 2);
+
+    setWorkspaceContextMenu(position);
   };
 
   const refreshFileTree = async () => {
@@ -968,16 +1010,86 @@ export function App() {
     }
 
     try {
-      await window.aiWorkspace.createWorkspaceEntry({ type, name: name.trim() });
+      const createdEntry = await window.aiWorkspace.createWorkspaceEntry({ type, name: name.trim() });
       await refreshFileTree();
+      setSelectedNode(createdEntry);
+
+      if (createdEntry.type === 'file') {
+        void handleNodeClick(createdEntry);
+      }
     } catch (error) {
       window.alert(getFriendlyErrorMessage(error, `新建${label}失败`));
     }
   };
 
-  const handleWorkspacePlaceholder = (message: string) => {
+  const handleCopyText = async (value: string, label: string) => {
+    await navigator.clipboard.writeText(value);
+    setContextMenu(null);
+    setPreviewContextMenu(null);
     setWorkspaceContextMenu(null);
-    window.alert(message);
+    setSessionContextMenu(null);
+
+    if (activePreviewTab) {
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === activePreviewTab.node.id
+        ? { ...tab, saveMessage: `${label}已复制` }
+        : tab));
+    }
+  };
+
+  const handleRenameWorkspaceEntry = async (node: FileTreeNode) => {
+    const newName = window.prompt(`请输入新的${node.type === 'directory' ? '文件夹' : '文件'}名称`, node.name);
+
+    setContextMenu(null);
+    setPreviewContextMenu(null);
+
+    if (!newName?.trim() || newName.trim() === node.name) {
+      return;
+    }
+
+    try {
+      const renamedNode = await window.aiWorkspace.renameWorkspaceEntry({
+        filePath: node.path,
+        newName: newName.trim()
+      });
+
+      await refreshFileTree();
+      setSelectedNode(renamedNode);
+      setSelectedFiles((currentFiles) => currentFiles.map((file) => file.path === node.path ? renamedNode : file));
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.path === node.path
+        ? {
+          ...tab,
+          node: renamedNode,
+          saveMessage: '已重命名'
+        }
+        : tab));
+
+      if (activePreviewTabId === node.id) {
+        setActivePreviewTabId(renamedNode.id);
+      }
+    } catch (error) {
+      window.alert(getFriendlyErrorMessage(error, '重命名失败'));
+    }
+  };
+
+  const handleFileContextMenuAction = async (item: string, node: FileTreeNode) => {
+    if (item === '添加到引用文件') {
+      handleAddToChat(node);
+      return;
+    }
+
+    if (item === '复制文件名' || item === '复制文件夹名') {
+      await handleCopyText(node.name, item);
+      return;
+    }
+
+    if (item === '复制路径') {
+      await handleCopyText(node.path, item);
+      return;
+    }
+
+    if (item === '重命名') {
+      await handleRenameWorkspaceEntry(node);
+    }
   };
 
   const handleAddToChat = (node: FileTreeNode) => {
@@ -989,6 +1101,25 @@ export function App() {
       return [...currentFiles, node];
     });
     setContextMenu(null);
+    setPreviewContextMenu(null);
+  };
+
+  const handlePreviewContextMenu = (event: ReactMouseEvent, tab: FilePreviewTab | null) => {
+    if (!tab) {
+      return;
+    }
+
+    event.preventDefault();
+    setContextMenu(null);
+    setSessionContextMenu(null);
+    setWorkspaceContextMenu(null);
+    setOpenTopMenu(null);
+    const position = getContextMenuPosition(event.clientX, event.clientY, previewContextMenuItems.length);
+
+    setPreviewContextMenu({
+      ...position,
+      tab
+    });
   };
 
   const handleRemoveReferenceFile = (node: FileTreeNode) => {
@@ -1364,6 +1495,7 @@ export function App() {
     }
 
     const items = contextMenu.node.type === 'directory' ? directoryContextMenuItems : fileContextMenuItems;
+    const enabledItems = contextMenu.node.type === 'directory' ? enabledDirectoryContextMenuItems : enabledFileContextMenuItems;
 
     return (
       <div
@@ -1374,9 +1506,9 @@ export function App() {
         {items.map((item) => (
           <button
             className={item === '添加到引用文件' ? 'context-menu-item primary' : 'context-menu-item'}
-            disabled={item !== '添加到引用文件'}
+            disabled={!enabledItems.has(item)}
             key={item}
-            onClick={() => item === '添加到引用文件' && handleAddToChat(contextMenu.node)}
+            onClick={() => void handleFileContextMenuAction(item, contextMenu.node)}
           >
             {item}
           </button>
@@ -1417,8 +1549,30 @@ export function App() {
       >
         <button className="context-menu-item primary" onClick={() => void handleCreateWorkspaceEntry('file')}>新建文件</button>
         <button className="context-menu-item primary" onClick={() => void handleCreateWorkspaceEntry('directory')}>新建文件夹</button>
-        <button className="context-menu-item" onClick={() => handleWorkspacePlaceholder('打开目录功能稍后接入。')}>打开目录</button>
-        <button className="context-menu-item" onClick={() => handleWorkspacePlaceholder('复制工作区路径功能稍后接入。')}>复制工作区路径</button>
+      </div>
+    );
+  };
+
+  const renderPreviewContextMenu = () => {
+    if (!previewContextMenu) {
+      return null;
+    }
+
+    return (
+      <div
+        className="context-menu"
+        onClick={(event) => event.stopPropagation()}
+        style={{ left: previewContextMenu.x, top: previewContextMenu.y }}
+      >
+        {previewContextMenuItems.map((item) => (
+          <button
+            className={item === '添加到引用文件' ? 'context-menu-item primary' : 'context-menu-item'}
+            key={item}
+            onClick={() => void handleFileContextMenuAction(item, previewContextMenu.tab.node)}
+          >
+            {item}
+          </button>
+        ))}
       </div>
     );
   };
@@ -1636,7 +1790,7 @@ export function App() {
                 </div>
               )}
             </div>
-            <article className="file-preview">
+            <article className="file-preview" onContextMenu={(event) => handlePreviewContextMenu(event, activePreviewTab)}>
               {activePreviewTab ? (
                 activePreviewTab.preview.status === 'ready' ? (
                   activePreviewTab.isEditable ? (
@@ -1790,6 +1944,7 @@ export function App() {
       {renderContextMenu()}
       {renderSessionContextMenu()}
       {renderWorkspaceContextMenu()}
+      {renderPreviewContextMenu()}
       {renderMemoryDebugModal()}
     </main>
   );

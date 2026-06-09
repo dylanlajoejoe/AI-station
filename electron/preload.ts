@@ -207,6 +207,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
   createWorkspaceEntry: (params: { type: 'file' | 'directory'; name: string }) => ipcRenderer.invoke('fileTree:createEntry', params) as Promise<FileTreeNode>,
+  renameWorkspaceEntry: (params: { filePath: string; newName: string }) => ipcRenderer.invoke('fileTree:renameEntry', params) as Promise<FileTreeNode>,
   readTextPreview: (params: string | { filePath: string; enableOcr?: boolean }) => ipcRenderer.invoke('file:readTextPreview', params) as Promise<TextPreviewResult>,
   saveTextFile: (params: SaveTextFileParams) => ipcRenderer.invoke('file:saveText', params) as Promise<SaveTextResult>,
   applyFileEdit: (params: ApplyFileEditParams) => ipcRenderer.invoke('file:applyEdit', params) as Promise<ApplyFileEditResult>,
