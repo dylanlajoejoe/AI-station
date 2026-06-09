@@ -1960,6 +1960,36 @@ function stripFileEditSuggestionBlock(content: string) {
     .trim();
 }
 
+function getFileEditDisplayContent(content: string, suggestions: FileEditSuggestion[]) {
+  const strippedContent = stripCompactRequestBlock(stripFileEditSuggestionBlock(content));
+
+  if (suggestions.length === 0) {
+    return strippedContent || content;
+  }
+
+  const operationLabels = suggestions.map((suggestion) => {
+    if (suggestion.operation === 'rename' && suggestion.targetPath) {
+      return `已准备将 ${suggestion.fileName} 重命名为 ${path.basename(suggestion.targetPath)}`;
+    }
+
+    if (suggestion.operation === 'update') {
+      return `已更新 ${suggestion.fileName} 的内容`;
+    }
+
+    if (suggestion.operation === 'create') {
+      return `已创建 ${suggestion.fileName}`;
+    }
+
+    if (suggestion.operation === 'delete') {
+      return `已准备删除 ${suggestion.fileName}`;
+    }
+
+    return suggestion.summary;
+  });
+
+  return operationLabels.join('；');
+}
+
 function parseCompactRequest(content: string): CompactRequest | null {
   const match = content.match(/```compact-request\s*([\s\S]*?)```/);
 
@@ -2806,6 +2836,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议；非删除操作会自动应用，不要要求用户再点击确认。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
               'file-edit-suggestion JSON 是系统内部指令，普通说明里不要复述 JSON、字段名或“操作建议”等内部细节。',
+              '修改已有文件或创建文件时，不要在普通回复里粘贴完整文件内容；只给 1 句简短说明，完整内容放进 nextContent 由系统写入文件。',
               'JSON 可以是单个对象，也可以是按执行顺序排列的数组；只有用户在同一句中明确要求连续操作时才使用数组，最多 2 个操作。',
               '每个 JSON 对象字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete、rename。',
               'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
@@ -2863,7 +2894,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     const fileEditSuggestions = parseFileEditSuggestions(content, referencedFiles, params.sessionId);
     const fileEditSuggestion = fileEditSuggestions[0] ?? null;
     const compactRequest = parseCompactRequest(content);
-    const displayContent = stripCompactRequestBlock(stripFileEditSuggestionBlock(content)) || content;
+    const displayContent = getFileEditDisplayContent(content, fileEditSuggestions);
     const assistantMessage = {
       id: createId('message'),
       session_id: params.sessionId,

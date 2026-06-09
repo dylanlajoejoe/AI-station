@@ -41,6 +41,7 @@ type PreviewContextMenuState = {
   x: number;
   y: number;
   tab: FilePreviewTab;
+  target: HTMLTextAreaElement | HTMLElement | null;
 } | null;
 
 type EntryDialogState = {
@@ -78,7 +79,7 @@ const fileContextMenuItems = ['添加到引用文件', '复制文件名', '复�
 const directoryContextMenuItems = ['添加到引用文件', '新建文件', '新建文件夹', '复制文件夹名', '复制路径', '重命名'];
 const enabledFileContextMenuItems = new Set(['添加到引用文件', '复制文件名', '复制路径', '重命名']);
 const enabledDirectoryContextMenuItems = new Set(['添加到引用文件', '新建文件', '新建文件夹', '复制文件夹名', '复制路径', '重命名']);
-const previewContextMenuItems = ['添加到引用文件', '复制文件名', '复制路径', '重命名'];
+const previewContextMenuItems = ['撤销', '剪切', '复制', '粘贴', '全选'];
 const editableExtensions = new Set(['.txt', '.md', '.csv', '.json', '.ts', '.tsx', '.js', '.jsx', '.css', '.html', '.htm', '.xml', '.yaml', '.yml', '.log']);
 const readonlyExtensions = new Set(['.doc', '.docx', '.xlsx', '.ppt', '.pptx', '.pdf']);
 
@@ -265,32 +266,6 @@ function isSensitiveFilePath(filePath: string) {
   ]);
 
   return segments.some((segment) => segment.startsWith('.') || sensitiveNames.has(segment.toLowerCase()));
-}
-
-function formatLocatedPathSummary(results: LocatedPathResult[]) {
-  if (results.length === 0) {
-    return '';
-  }
-
-  const lines = results.map((result) => {
-    if (result.status === 'found') {
-      return `已定位：${result.input} -> ${result.path}`;
-    }
-
-    return `${result.input}：${result.message}`;
-  });
-
-  return `\n\n路径定位结果：\n${lines.join('\n')}`;
-}
-
-function formatReferencedFileSummary(results: ReferencedFileContent[]) {
-  if (results.length === 0) {
-    return '';
-  }
-
-  const lines = results.map((result) => `${result.status === 'read' ? '已读取' : '未读取'}：${result.name}（${result.message}）`);
-
-  return `\n\n引用文件读取结果：\n${lines.join('\n')}`;
 }
 
 function formatContextLength(characterCount: number) {
@@ -1313,6 +1288,7 @@ export function App() {
     }
 
     event.preventDefault();
+    const target = event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLElement ? event.target : null;
     setContextMenu(null);
     setSessionContextMenu(null);
     setWorkspaceContextMenu(null);
@@ -1321,8 +1297,36 @@ export function App() {
 
     setPreviewContextMenu({
       ...position,
-      tab
+      tab,
+      target
     });
+  };
+
+  const handlePreviewContextMenuAction = (item: string, menu: NonNullable<PreviewContextMenuState>) => {
+    const editor = menu.target instanceof HTMLTextAreaElement
+      ? menu.target
+      : document.querySelector<HTMLTextAreaElement>('.text-preview-editor');
+
+    if (item === '复制' && !(menu.target instanceof HTMLTextAreaElement)) {
+      const selection = window.getSelection()?.toString();
+      void handleCopyText(selection || menu.tab.preview.content, '内容');
+      return;
+    }
+
+    if (!editor || !menu.tab.isEditable) {
+      setPreviewContextMenu(null);
+      return;
+    }
+
+    editor.focus();
+
+    if (item === '全选') {
+      editor.select();
+    } else {
+      document.execCommand(item === '撤销' ? 'undo' : item === '剪切' ? 'cut' : item === '复制' ? 'copy' : 'paste');
+    }
+
+    setPreviewContextMenu(null);
   };
 
   const handlePreviewWheel = (event: React.WheelEvent<HTMLElement>) => {
@@ -1442,7 +1446,7 @@ export function App() {
         ...currentMessages.filter((message) => message.id !== userMessage.id && message.id !== streamingMessageId),
         {
           ...result.userMessage,
-          content: `${result.userMessage.content}${formatLocatedPathSummary(result.locatedPaths)}${formatReferencedFileSummary(result.referencedFiles)}`
+          content: result.userMessage.content
         },
         {
           ...result.assistantMessage,
@@ -1837,21 +1841,28 @@ export function App() {
       return null;
     }
 
+    const readonlyItems = new Set(['撤销', '剪切', '粘贴']);
+
     return (
       <div
         className="context-menu"
         onClick={(event) => event.stopPropagation()}
         style={{ left: previewContextMenu.x, top: previewContextMenu.y }}
       >
-        {previewContextMenuItems.map((item) => (
-          <button
-            className={item === '添加到引用文件' ? 'context-menu-item primary' : 'context-menu-item'}
-            key={item}
-            onClick={() => void handleFileContextMenuAction(item, previewContextMenu.tab.node)}
-          >
-            {item}
-          </button>
-        ))}
+        {previewContextMenuItems.map((item) => {
+          const isDisabled = !previewContextMenu.tab.isEditable && readonlyItems.has(item);
+
+          return (
+            <button
+              className="context-menu-item"
+              disabled={isDisabled}
+              key={item}
+              onClick={() => handlePreviewContextMenuAction(item, previewContextMenu)}
+            >
+              {item}
+            </button>
+          );
+        })}
       </div>
     );
   };
