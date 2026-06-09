@@ -122,6 +122,7 @@ type SendMessageResult = {
   locatedPaths: LocatedPathResult[];
   referencedFiles: ReferencedFileContent[];
   fileEditSuggestion: FileEditSuggestion | null;
+  fileEditSuggestions: FileEditSuggestion[];
 };
 
 type SessionEventRecord = {

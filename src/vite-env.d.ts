@@ -213,6 +213,7 @@ interface Window {
       locatedPaths: LocatedPathResult[];
       referencedFiles: ReferencedFileContent[];
       fileEditSuggestion: FileEditSuggestion | null;
+      fileEditSuggestions: FileEditSuggestion[];
     }>;
     stopMessage: (params: {
       sessionId: string;

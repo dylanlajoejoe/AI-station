@@ -111,6 +111,7 @@ type SendMessageResult = {
   locatedPaths: LocatedPathResult[];
   referencedFiles: ReferencedFileContent[];
   fileEditSuggestion: FileEditSuggestion | null;
+  fileEditSuggestions: FileEditSuggestion[];
 };
 
 type FileEditSuggestion = {
@@ -545,7 +546,15 @@ function getHistoryMessagesForModel(sessionId: string) {
     : Math.max(0, messages.length - 20);
   const safeStartIndex = startIndex > 0 ? startIndex : Math.max(0, messages.length - 20);
 
-  return messages.slice(safeStartIndex).slice(-20).map((message) => ({
+  const staleCapabilityPattern = /(@|引用).*文件|再次引用|originalHash|只能生成.*建议|需要.*确认后.*执行|无法直接读取.*(xlsx|pdf|office|二进制)|二进制格式.*无法.*读取/i;
+
+  return messages.slice(safeStartIndex).slice(-20).filter((message) => {
+    if (message.role !== 'assistant') {
+      return true;
+    }
+
+    return !staleCapabilityPattern.test(message.content);
+  }).map((message) => ({
     role: message.role,
     content: message.content
   }));
@@ -1523,11 +1532,15 @@ async function findWorkspaceFilesByName(workspacePath: string, targetName: strin
       const entryPath = path.join(directoryPath, entry.name);
 
       const entryStem = path.basename(entry.name, path.extname(entry.name));
+      const normalizedEntryName = normalizeSemanticName(entry.name);
+      const normalizedEntryStem = normalizeSemanticName(entryStem);
       const isMatchedFile = entry.isFile()
-        && (normalizeSemanticName(entry.name) === normalizedTargetName
+        && (normalizedEntryName === normalizedTargetName
+          || normalizedEntryName.includes(normalizedTargetName)
           || (matchStem && entryStem.length >= 2 && (
-            normalizeSemanticName(entryStem) === normalizedTargetName
-            || normalizedTargetName.includes(normalizeSemanticName(entryStem))
+            normalizedEntryStem === normalizedTargetName
+            || normalizedEntryStem.includes(normalizedTargetName)
+            || normalizedTargetName.includes(normalizedEntryStem)
           )));
 
       if (isMatchedFile) {
@@ -1797,34 +1810,16 @@ function formatReferencedFileNames(files: ReferencedFileContent[]) {
   return readableFiles.map((file) => `- ${file.name}: ${file.path}`).join('\n');
 }
 
-function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFileContent[], sessionId: string): FileEditSuggestion | null {
-  const match = content.match(/```file-edit-suggestion\s*([\s\S]*?)```/);
+type FileEditSuggestionCandidate = {
+  operation?: unknown;
+  filePath?: unknown;
+  targetPath?: unknown;
+  originalHash?: unknown;
+  nextContent?: unknown;
+  summary?: unknown;
+};
 
-  if (!match) {
-    return null;
-  }
-
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(match[1]);
-  } catch {
-    return null;
-  }
-
-  if (!parsed || typeof parsed !== 'object') {
-    return null;
-  }
-
-  const candidate = parsed as {
-    operation?: unknown;
-    filePath?: unknown;
-    targetPath?: unknown;
-    originalHash?: unknown;
-    nextContent?: unknown;
-    summary?: unknown;
-  };
-
+function parseFileEditSuggestionCandidate(candidate: FileEditSuggestionCandidate, referencedFiles: ReferencedFileContent[], sessionId: string): FileEditSuggestion | null {
   if (
     (candidate.operation !== 'update' && candidate.operation !== 'create' && candidate.operation !== 'delete' && candidate.operation !== 'rename')
     || typeof candidate.filePath !== 'string'
@@ -1928,10 +1923,40 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
   };
 }
 
+function parseFileEditSuggestions(content: string, referencedFiles: ReferencedFileContent[], sessionId: string): FileEditSuggestion[] {
+  const match = content.match(/```file-edit-suggestion\s*([\s\S]*?)```/);
+
+  if (!match) {
+    return [];
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return [];
+  }
+
+  const candidates = Array.isArray(parsed) ? parsed : [parsed];
+
+  return candidates
+    .filter((candidate): candidate is FileEditSuggestionCandidate => typeof candidate === 'object' && candidate !== null)
+    .slice(0, 3)
+    .map((candidate) => parseFileEditSuggestionCandidate(candidate, referencedFiles, sessionId))
+    .filter((suggestion): suggestion is FileEditSuggestion => suggestion !== null);
+}
+
+function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFileContent[], sessionId: string): FileEditSuggestion | null {
+  return parseFileEditSuggestions(content, referencedFiles, sessionId)[0] ?? null;
+}
+
 function stripFileEditSuggestionBlock(content: string) {
   return content
     .replace(/```file-edit-suggestion\s*[\s\S]*?```/g, '')
     .replace(/^\s*\{\s*"operation"\s*:\s*"(?:update|create|delete|rename)"[\s\S]*?\}\s*$/m, '')
+    .replace(/^\s*\[\s*\{\s*"operation"\s*:\s*"(?:update|create|delete|rename)"[\s\S]*?\}\s*\]\s*$/m, '')
+    .replace(/\{\s*"operation"\s*:\s*"(?:update|create|delete|rename)"[\s\S]*?\}/g, '')
     .trim();
 }
 
@@ -2781,12 +2806,14 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议；非删除操作会自动应用，不要要求用户再点击确认。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
               'file-edit-suggestion JSON 是系统内部指令，普通说明里不要复述 JSON、字段名或“操作建议”等内部细节。',
-              'JSON 字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete、rename。',
+              'JSON 可以是单个对象，也可以是按执行顺序排列的数组；只有用户在同一句中明确要求连续操作时才使用数组，最多 2 个操作。',
+              '每个 JSON 对象字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete、rename。',
               'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
-              'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自已读取引用文件。',
+              'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
               'rename 只需要包含 targetPath；filePath 必须来自用户消息路径定位结果或已读取引用文件，不需要 originalHash 或文件内容。',
               'create 必须包含 nextContent，filePath 必须在当前工作区内且是文本文件路径。',
-              '不要一次生成多个文件操作，不要生成 diff。删除文件必须等待用户确认，重命名、创建和更新文件可直接生成建议并由系统自动应用。',
+              '不要生成 diff。删除文件必须等待用户确认，重命名、创建和更新文件可直接生成建议并由系统自动应用。',
+              '如果用户同一句要求先重命名再修改内容，可生成 [rename, update] 数组；update 使用重命名前已读取文件的 filePath 和 originalHash，系统会在应用时把 update 重定向到重命名后的路径。',
               '系统会提供当前会话 Memory。Memory 只是辅助上下文；如果 Memory 与当前用户消息或当前文件内容冲突，以当前用户消息和当前文件内容为准。',
               '如果你判断当前会话历史已经过长、旧讨论可以压缩，请在普通回复后追加一个 fenced JSON 块，格式为 ```compact-request。',
               'compact-request JSON 必须为 {"type":"REQUEST_COMPACT","reason":"...","suggestedRange":{"beforeMessageId":"可选消息ID"}}。',
@@ -2833,7 +2860,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       throw new Error('AI 返回内容为空');
     }
 
-    const fileEditSuggestion = parseFileEditSuggestion(content, referencedFiles, params.sessionId);
+    const fileEditSuggestions = parseFileEditSuggestions(content, referencedFiles, params.sessionId);
+    const fileEditSuggestion = fileEditSuggestions[0] ?? null;
     const compactRequest = parseCompactRequest(content);
     const displayContent = stripCompactRequestBlock(stripFileEditSuggestionBlock(content)) || content;
     const assistantMessage = {
@@ -2844,8 +2872,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       created_at: new Date().toISOString()
     };
 
-    if (fileEditSuggestion) {
-      fileEditSuggestion.messageId = assistantMessage.id;
+    for (const suggestion of fileEditSuggestions) {
+      suggestion.messageId = assistantMessage.id;
     }
 
     db.prepare(`
@@ -2858,17 +2886,17 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       params.sessionId
     );
 
-    if (fileEditSuggestion) {
+    for (const suggestion of fileEditSuggestions) {
       recordSessionEvent(params.sessionId, 'file_edit_suggested', {
-        suggestionId: fileEditSuggestion.id,
+        suggestionId: suggestion.id,
         messageId: assistantMessage.id,
-        operation: fileEditSuggestion.operation,
-        filePath: fileEditSuggestion.filePath,
-        targetPath: fileEditSuggestion.targetPath,
-        fileName: fileEditSuggestion.fileName,
-        originalHash: fileEditSuggestion.originalHash,
-        proposedHash: fileEditSuggestion.proposedHash,
-        summary: fileEditSuggestion.summary
+        operation: suggestion.operation,
+        filePath: suggestion.filePath,
+        targetPath: suggestion.targetPath,
+        fileName: suggestion.fileName,
+        originalHash: suggestion.originalHash,
+        proposedHash: suggestion.proposedHash,
+        summary: suggestion.summary
       });
     }
     if (compactRequest) {
@@ -2888,7 +2916,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       assistantMessage: mapMessage(assistantMessage),
       locatedPaths: params.locatedPaths,
       referencedFiles,
-      fileEditSuggestion
+      fileEditSuggestion,
+      fileEditSuggestions
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {

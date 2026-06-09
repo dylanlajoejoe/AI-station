@@ -1434,6 +1434,10 @@ export function App() {
         }))
       });
 
+      const resultFileEditSuggestions = result.fileEditSuggestions ?? [];
+      const fileEditSuggestions = resultFileEditSuggestions.length > 0
+        ? resultFileEditSuggestions
+        : result.fileEditSuggestion ? [result.fileEditSuggestion] : [];
       setMessages((currentMessages) => [
         ...currentMessages.filter((message) => message.id !== userMessage.id && message.id !== streamingMessageId),
         {
@@ -1442,15 +1446,27 @@ export function App() {
         },
         {
           ...result.assistantMessage,
-          fileEditSuggestionId: result.fileEditSuggestion?.operation === 'delete' ? result.fileEditSuggestion.id : undefined
+          fileEditSuggestionId: undefined
         }
       ]);
-      if (result.fileEditSuggestion) {
-        const suggestion = result.fileEditSuggestion as FileEditSuggestion;
-        if (suggestion.operation === 'delete') {
-          setFileEditSuggestions((currentSuggestions) => [...currentSuggestions, suggestion]);
-        } else {
-          void handleApplyFileEdit(suggestion);
+      if (fileEditSuggestions.length > 0) {
+        const autoApplySuggestions = fileEditSuggestions;
+
+        let currentPathAfterRename: string | null = null;
+        for (const suggestion of autoApplySuggestions) {
+          const effectiveSuggestion: FileEditSuggestion = currentPathAfterRename && suggestion.operation === 'update'
+            ? {
+              ...suggestion,
+              filePath: currentPathAfterRename,
+              fileName: currentPathAfterRename.split(/[\\/]/).pop() ?? suggestion.fileName
+            }
+            : suggestion;
+
+          await handleApplyFileEdit(effectiveSuggestion as FileEditSuggestion);
+
+          if (effectiveSuggestion.operation === 'rename' && effectiveSuggestion.targetPath) {
+            currentPathAfterRename = effectiveSuggestion.targetPath;
+          }
         }
       }
       setSelectedFiles([]);
