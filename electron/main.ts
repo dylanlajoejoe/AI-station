@@ -138,6 +138,7 @@ type ApplyFileEditParams = {
 type CreateWorkspaceEntryParams = {
   type: 'file' | 'directory';
   name: string;
+  parentPath?: string | null;
 };
 
 type SessionEventRow = {
@@ -453,7 +454,7 @@ function saveMemoryCompressionResult(result: CompressionResult) {
     updated_at: now
   });
 
-  db.prepare('DELETE FROM file_index WHERE session_id = ?').run(result.sessionId);
+  db.prepare("DELETE FROM file_index WHERE session_id = ? AND operation != 'referenced'").run(result.sessionId);
   const insertFileIndex = db.prepare(`
     INSERT INTO file_index (id, session_id, task_id, file_path, operation, reason, symbols_json, content_hash, mtime, created_at, updated_at)
     VALUES (@id, @session_id, @task_id, @file_path, @operation, @reason, @symbols_json, @content_hash, @mtime, @created_at, @updated_at)
@@ -837,6 +838,85 @@ function formatMemoryContext(sessionId: string) {
   return parts.join('\n\n');
 }
 
+function tokenizeReferenceQuery(content: string) {
+  const normalized = content.toLowerCase();
+  const asciiTokens = normalized.match(/[a-z0-9_.-]{2,}/g) ?? [];
+  const chineseTokens = normalized.match(/[\u4e00-\u9fa5]{2,}/g) ?? [];
+
+  return Array.from(new Set([...asciiTokens, ...chineseTokens]));
+}
+
+function getRememberedReferencedFiles(sessionId: string, content: string): ReferencedFileInput[] {
+  const tokens = tokenizeReferenceQuery(content);
+
+  if (tokens.length === 0) {
+    return [];
+  }
+
+  const rows = db.prepare(`
+    SELECT file_path, operation, updated_at
+    FROM file_index
+    WHERE session_id = ? AND operation IN ('read', 'referenced')
+    ORDER BY updated_at DESC
+    LIMIT 30
+  `).all(sessionId) as Array<{ file_path: string; operation: string; updated_at: string }>;
+  const uniquePaths = Array.from(new Set(rows.map((row) => row.file_path).filter(Boolean)));
+
+  if (uniquePaths.length === 0) {
+    return [];
+  }
+
+  const scored = uniquePaths.map((filePath) => {
+    const normalizedPath = filePath.toLowerCase();
+    const fileName = path.basename(filePath).toLowerCase();
+    const score = tokens.reduce((total, token) => {
+      if (fileName.includes(token)) return total + 3;
+      if (normalizedPath.includes(token)) return total + 1;
+      return total;
+    }, 0);
+
+    return { filePath, score };
+  });
+  const matched = scored.filter((item) => item.score > 0).sort((left, right) => right.score - left.score);
+
+  if (matched.length === 0) {
+    return [];
+  }
+
+  const selected = matched.slice(0, 5);
+
+  return selected.map((item) => ({
+    name: path.basename(item.filePath),
+    path: item.filePath,
+    type: 'file'
+  }));
+}
+
+function rememberReferencedFiles(sessionId: string, files: ReferencedFileContent[]) {
+  const now = new Date().toISOString();
+  const insertFileIndex = db.prepare(`
+    INSERT INTO file_index (id, session_id, task_id, file_path, operation, reason, symbols_json, content_hash, mtime, created_at, updated_at)
+    VALUES (@id, @session_id, @task_id, @file_path, @operation, @reason, @symbols_json, @content_hash, @mtime, @created_at, @updated_at)
+  `);
+
+  for (const file of files) {
+    if (!file.path) continue;
+    insertFileIndex.run({
+      id: createId('file-index'),
+      session_id: sessionId,
+      task_id: null,
+      file_path: file.path,
+      operation: file.status === 'read' ? 'referenced' : 'skipped',
+      reason: file.message,
+      symbols_json: '[]',
+      content_hash: file.originalHash,
+      mtime: null,
+      created_at: now,
+      updated_at: now
+    });
+  }
+}
+
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -1207,7 +1287,10 @@ async function renameWorkspaceEntry(params: { filePath: string; targetPath: stri
 
 async function createWorkspaceEntry(params: CreateWorkspaceEntryParams) {
   const workspacePath = await getTrustedWorkspacePath();
-  const normalizedName = params.name.trim();
+  const parentPath = params.parentPath ? path.resolve(params.parentPath) : workspacePath;
+  const normalizedName = params.type === 'file' && !path.extname(params.name.trim())
+    ? `${params.name.trim()}.txt`
+    : params.name.trim();
 
   if (!normalizedName) {
     throw new Error('请输入名称');
@@ -1217,7 +1300,17 @@ async function createWorkspaceEntry(params: CreateWorkspaceEntryParams) {
     throw new Error('名称不能是绝对路径');
   }
 
-  const targetPath = path.resolve(workspacePath, normalizedName);
+  if (!isInsideWorkspace(workspacePath, parentPath)) {
+    throw new Error('只能在当前工作区内创建');
+  }
+
+  const parentStat = await stat(parentPath);
+
+  if (!parentStat.isDirectory()) {
+    throw new Error('只能在文件夹内创建');
+  }
+
+  const targetPath = path.resolve(parentPath, normalizedName);
 
   if (!isInsideWorkspace(workspacePath, targetPath)) {
     throw new Error('只能在当前工作区内创建');
@@ -2240,20 +2333,25 @@ ipcMain.handle('fileTree:renameEntry', async (_event, params: { filePath: string
     throw new Error('隐藏或敏感路径暂不支持直接重命名');
   }
 
-  const result = await renameWorkspaceEntry({
-    filePath: params.filePath,
-    targetPath,
-    expectedOriginalHash: null,
-    sensitivePathConfirmed: false
-  });
+  try {
+    await stat(targetPath);
+    throw new Error('目标路径已存在，不能重命名');
+  } catch (error) {
+    if (error instanceof Error && error.message === '目标路径已存在，不能重命名') {
+      throw error;
+    }
+  }
+
+  await rename(params.filePath, targetPath);
+  const renamedStat = await stat(targetPath);
 
   return {
     id: targetPath,
     name: path.basename(targetPath),
     path: targetPath,
     type: sourceStat.isDirectory() ? 'directory' : 'file',
-    size: sourceStat.isDirectory() ? null : result.size,
-    modifiedAt: result.modifiedAt
+    size: sourceStat.isDirectory() ? null : renamedStat.size,
+    modifiedAt: renamedStat.mtime.toISOString()
   };
 });
 
@@ -2353,20 +2451,29 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
   const timeoutMs = Number(aiConfig.timeoutMs ?? 30000);
   const controller = new AbortController();
   activeChatControllers.set(params.sessionId, controller);
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let isRequestTimeout = false;
+  let timeout: NodeJS.Timeout | null = null;
   const now = new Date().toISOString();
   const workspaceTree = params.workspacePath ? await collectWorkspaceTree(params.workspacePath) : null;
   const workspaceTreeText = workspaceTree
     ? formatWorkspaceTree(workspaceTree.entries, workspaceTree.wasTruncated)
     : '用户尚未选择工作区目录。';
   const locatedPathsText = formatLocatedPaths(params.locatedPaths);
-  const filesToRead = mergeReferencedFilesWithLocatedPaths(params.referencedFiles, params.locatedPaths);
+  const rememberedReferenceFiles = getRememberedReferencedFiles(params.sessionId, params.content);
+  const filesToRead = mergeReferencedFilesWithLocatedPaths([
+    ...rememberedReferenceFiles,
+    ...params.referencedFiles
+  ], params.locatedPaths);
   const referencedFiles = await readReferencedFiles(params.workspacePath, filesToRead);
   const referencedFilesText = formatReferencedFiles(referencedFiles);
   const referencedFileNamesText = formatReferencedFileNames(referencedFiles);
   const memoryContextText = formatMemoryContext(params.sessionId);
   const historyMessages = getHistoryMessagesForModel(params.sessionId);
   recordSessionEvent(params.sessionId, 'referenced_files_read', {
+    source: {
+      currentReferenceCount: params.referencedFiles.length,
+      rememberedReferenceCount: rememberedReferenceFiles.length
+    },
     files: referencedFiles.map((file) => ({
       name: file.name,
       path: file.path,
@@ -2375,6 +2482,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
       message: file.message
     }))
   });
+  rememberReferencedFiles(params.sessionId, referencedFiles);
   const userMessage = {
     id: createId('message'),
     session_id: params.sessionId,
@@ -2389,6 +2497,11 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
   `).run(userMessage);
 
   try {
+    timeout = setTimeout(() => {
+      isRequestTimeout = true;
+      controller.abort();
+    }, timeoutMs);
+
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -2405,7 +2518,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '你是一个桌面 AI 助手。',
               '你可以看到用户已选择工作区的目录结构摘要，包括文件名、文件夹名、大小和修改时间。',
               '如果用户消息里包含路径，系统会真实定位路径；定位到的文本文件会自动读取内容并提供给你。',
-              '用户显式引用的文件内容也会由系统读取后提供给你。',
+              '用户显式引用的文件内容会由系统读取后提供给你；历史引用文件会根据当前问题自动匹配并重新读取。',
               '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件。',
               '如果还需要其他文件内容，请明确要求用户引用文件或粘贴内容。',
               '你不能直接修改文件，只能生成修改建议。',
@@ -2429,7 +2542,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '用户消息路径定位结果：',
               locatedPathsText,
               '',
-              '用户显式引用文件读取结果：',
+              '当前问题相关引用文件读取结果：',
               referencedFilesText,
               '',
               '当前工作区目录结构摘要：',
@@ -2440,7 +2553,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
           {
             role: 'user',
             content: referencedFileNamesText
-              ? `${params.content}\n\n本轮用户引用并已读取的文件：\n${referencedFileNamesText}\n\n请优先基于这些文件回答用户问题。`
+              ? `${params.content}\n\n本轮相关并已读取的引用文件：\n${referencedFileNamesText}\n\n请优先基于这些文件回答用户问题。`
               : params.content
           }
         ]
@@ -2522,12 +2635,18 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
+      if (isRequestTimeout) {
+        throw new Error('AI 接口请求超时');
+      }
+
       throw new Error('回复已停止');
     }
 
     throw error;
   } finally {
-    clearTimeout(timeout);
+    if (timeout) {
+      clearTimeout(timeout);
+    }
     activeChatControllers.delete(params.sessionId);
   }
 });

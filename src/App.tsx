@@ -66,9 +66,9 @@ type FilePreviewTab = {
 };
 
 const fileContextMenuItems = ['添加到引用文件', '复制文件名', '复制路径', '重命名'];
-const directoryContextMenuItems = ['添加到引用文件', '复制文件夹名', '复制路径', '重命名'];
+const directoryContextMenuItems = ['添加到引用文件', '新建文件', '新建文件夹', '复制文件夹名', '复制路径', '重命名'];
 const enabledFileContextMenuItems = new Set(['添加到引用文件', '复制文件名', '复制路径', '重命名']);
-const enabledDirectoryContextMenuItems = new Set(['添加到引用文件', '复制文件夹名', '复制路径', '重命名']);
+const enabledDirectoryContextMenuItems = new Set(['添加到引用文件', '新建文件', '新建文件夹', '复制文件夹名', '复制路径', '重命名']);
 const previewContextMenuItems = ['添加到引用文件', '复制文件名', '复制路径', '重命名'];
 const editableExtensions = new Set(['.txt', '.md', '.csv', '.json', '.ts', '.tsx', '.js', '.jsx', '.css', '.html', '.htm', '.xml', '.yaml', '.yml', '.log']);
 const readonlyExtensions = new Set(['.doc', '.docx', '.xlsx', '.ppt', '.pptx', '.pdf']);
@@ -999,18 +999,19 @@ export function App() {
     setFileTree(nodes);
   };
 
-  const handleCreateWorkspaceEntry = async (type: 'file' | 'directory') => {
+  const handleCreateWorkspaceEntry = async (type: 'file' | 'directory', parentPath: string | null = null) => {
     const label = type === 'file' ? '文件' : '文件夹';
-    const name = window.prompt(`请输入新${label}名称`);
+    const name = window.prompt(`请输入新${label}名称${type === 'file' ? '（不填扩展名默认 .txt）' : ''}`);
 
     setWorkspaceContextMenu(null);
+    setContextMenu(null);
 
     if (!name?.trim()) {
       return;
     }
 
     try {
-      const createdEntry = await window.aiWorkspace.createWorkspaceEntry({ type, name: name.trim() });
+      const createdEntry = await window.aiWorkspace.createWorkspaceEntry({ type, name: name.trim(), parentPath });
       await refreshFileTree();
       setSelectedNode(createdEntry);
 
@@ -1078,6 +1079,16 @@ export function App() {
   const handleFileContextMenuAction = async (item: string, node: FileTreeNode) => {
     if (item === '添加到引用文件') {
       handleAddToChat(node);
+      return;
+    }
+
+    if (item === '新建文件') {
+      await handleCreateWorkspaceEntry('file', node.path);
+      return;
+    }
+
+    if (item === '新建文件夹') {
+      await handleCreateWorkspaceEntry('directory', node.path);
       return;
     }
 
@@ -1239,6 +1250,7 @@ export function App() {
       if (result.fileEditSuggestion) {
         setFileEditSuggestions((currentSuggestions) => [...currentSuggestions, result.fileEditSuggestion as FileEditSuggestion]);
       }
+      setSelectedFiles([]);
       void window.aiWorkspace.listSessions().then(setSessions);
     } catch (error) {
       const errorMessage = getFriendlyErrorMessage(error, 'AI 接口调用失败');

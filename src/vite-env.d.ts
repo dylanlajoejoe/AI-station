@@ -166,6 +166,7 @@ interface Window {
     createWorkspaceEntry: (params: {
       type: 'file' | 'directory';
       name: string;
+      parentPath?: string | null;
     }) => Promise<FileTreeNode>;
     renameWorkspaceEntry: (params: {
       filePath: string;
