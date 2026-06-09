@@ -437,11 +437,12 @@ function getSessionTranscriptForMemory(sessionId: string): CompressionInputMessa
         });
       }
     } else if (event.type === 'file_edit_applied' || event.type === 'file_edit_suggested' || event.type === 'file_edit_failed') {
+      const operation = typeof payload.operation === 'string' ? payload.operation : 'update';
       transcript.push({
         id: event.id,
         role: 'tool',
         toolName: event.type === 'file_edit_suggested' ? 'edit_suggestion' : 'edit',
-        input: { filePath: payload.filePath, targetPath: payload.targetPath },
+        input: { filePath: payload.filePath, targetPath: payload.targetPath, operation },
         output: payload.summary ?? payload.message ?? event.type,
         createdAt: event.created_at,
         sortAt: event.created_at
@@ -811,6 +812,7 @@ function formatMemoryContext(sessionId: string) {
     const taskState = safeJsonParse(taskStateRow.state_json) as Record<string, unknown> | null;
     if (taskState) {
       const taskParts = [
+        '能力优先规则：如果历史 Memory 与当前系统能力、当前文件定位或当前读取结果冲突，必须以后者为准；不要沿用“必须 @ 文件”“只能生成建议”“Office/PDF 无法读取”等过时能力声明。',
         `目标：${String(taskState.goal ?? '未记录')}`,
         formatStringList('用户要求', taskState.requirements),
         formatStringList('已完成', taskState.completed),
@@ -862,8 +864,9 @@ function tokenizeReferenceQuery(content: string) {
 
 function getRememberedReferencedFiles(sessionId: string, content: string): ReferencedFileInput[] {
   const tokens = tokenizeReferenceQuery(content);
+  const hasCurrentFileReference = /(这个|该|当前|原|上面|刚才|文件名|内容|文章|作文)/.test(content);
 
-  if (tokens.length === 0) {
+  if (tokens.length === 0 && !hasCurrentFileReference) {
     return [];
   }
 
@@ -878,6 +881,14 @@ function getRememberedReferencedFiles(sessionId: string, content: string): Refer
 
   if (uniquePaths.length === 0) {
     return [];
+  }
+
+  if (hasCurrentFileReference && tokens.length === 0) {
+    return uniquePaths.slice(0, 1).map((filePath) => ({
+      name: path.basename(filePath),
+      path: filePath,
+      type: 'file'
+    }));
   }
 
   const scored = uniquePaths.map((filePath) => {
@@ -1440,9 +1451,31 @@ function extractFileNameCandidates(content: string) {
   return Array.from(new Set((content.match(fileNamePattern) ?? []).map(normalizePathCandidate))).slice(0, 20);
 }
 
-async function findWorkspaceFilesByName(workspacePath: string, targetName: string) {
+function normalizeSemanticName(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function extractSemanticFileNameCandidates(content: string) {
+  const candidates = new Set<string>();
+  const phrases = content
+    .split(/[\s，。！？、；：,.!?;:\n\r\t()[\]{}<>《》“”‘’"'`~]+/)
+    .map((phrase) => normalizePathCandidate(phrase))
+    .filter((phrase) => phrase.length >= 2 && phrase.length <= 80);
+
+  for (const phrase of phrases) {
+    if (extractFileNameCandidates(phrase).length > 0) {
+      continue;
+    }
+
+    candidates.add(phrase);
+  }
+
+  return Array.from(candidates).slice(0, 20);
+}
+
+async function findWorkspaceFilesByName(workspacePath: string, targetName: string, matchStem = false) {
   const matches: LocatedPathResult[] = [];
-  const normalizedTargetName = targetName.toLowerCase();
+  const normalizedTargetName = normalizeSemanticName(targetName);
   const maxMatches = 20;
 
   async function walk(directoryPath: string) {
@@ -1465,7 +1498,15 @@ async function findWorkspaceFilesByName(workspacePath: string, targetName: strin
 
       const entryPath = path.join(directoryPath, entry.name);
 
-      if (entry.isFile() && entry.name.toLowerCase() === normalizedTargetName) {
+      const entryStem = path.basename(entry.name, path.extname(entry.name));
+      const isMatchedFile = entry.isFile()
+        && (normalizeSemanticName(entry.name) === normalizedTargetName
+          || (matchStem && entryStem.length >= 2 && (
+            normalizeSemanticName(entryStem) === normalizedTargetName
+            || normalizedTargetName.includes(normalizeSemanticName(entryStem))
+          )));
+
+      if (isMatchedFile) {
         try {
           const entryStat = await stat(entryPath);
           matches.push({
@@ -1508,6 +1549,7 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
   const candidates = extractPathCandidates(content);
   const results: LocatedPathResult[] = [];
   const seenInputs = new Set(candidates.map((candidate) => candidate.toLowerCase()));
+  const seenPaths = new Set<string>();
 
   for (const candidate of candidates) {
     const targetPath = path.isAbsolute(candidate) ? candidate : path.join(workspacePath ?? process.cwd(), candidate);
@@ -1517,7 +1559,7 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
       const targetStat = await stat(resolvedPath);
       const isDirectory = targetStat.isDirectory();
 
-      results.push({
+      const foundResult: LocatedPathResult = {
         input: candidate,
         status: 'found',
         path: resolvedPath,
@@ -1526,7 +1568,9 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
         size: targetStat.isFile() ? targetStat.size : null,
         modifiedAt: targetStat.mtime.toISOString(),
         message: '已在当前工作区定位到该路径'
-      });
+      };
+      results.push(foundResult);
+      seenPaths.add(resolvedPath);
     } catch {
       results.push({
         input: candidate,
@@ -1550,7 +1594,10 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
       const matches = await findWorkspaceFilesByName(workspacePath, fileName);
 
       if (matches.length === 1 && matches[0].status === 'found') {
-        results.push(matches[0]);
+        if (matches[0].path && !seenPaths.has(matches[0].path)) {
+          results.push(matches[0]);
+          seenPaths.add(matches[0].path);
+        }
       } else if (matches.length > 1) {
         results.push({
           input: fileName,
@@ -1561,6 +1608,37 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
           size: null,
           modifiedAt: null,
           message: `当前工作区内存在 ${matches.length} 个同名文件，请提供更具体路径`
+        });
+      }
+    }
+
+    for (const semanticName of extractSemanticFileNameCandidates(content)) {
+      const normalizedSemanticName = semanticName.toLowerCase();
+
+      if (seenInputs.has(normalizedSemanticName)) {
+        continue;
+      }
+
+      const matches = await findWorkspaceFilesByName(workspacePath, semanticName, true);
+
+      if (matches.length === 1 && matches[0].status === 'found') {
+        if (matches[0].path && !seenPaths.has(matches[0].path)) {
+          results.push({
+            ...matches[0],
+            message: '已按文件名语义在当前工作区唯一定位'
+          });
+          seenPaths.add(matches[0].path);
+        }
+      } else if (matches.length > 1) {
+        results.push({
+          input: semanticName,
+          status: 'not_found',
+          path: null,
+          name: semanticName,
+          type: null,
+          size: null,
+          modifiedAt: null,
+          message: `当前工作区内存在 ${matches.length} 个名称匹配的文件，请提供更具体路径`
         });
       }
     }
@@ -2668,18 +2746,18 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '你是一个桌面 AI 助手。',
               '你可以看到用户已选择工作区的目录结构摘要，包括文件名、文件夹名、大小和修改时间。',
               '如果用户消息里包含路径，系统会真实定位路径；定位到的文本、Office、PDF 文件会自动读取或提取文本并提供给你。',
-              '用户显式引用的文件内容会由系统读取后提供给你；用户消息语义里能唯一定位到的文件会自动读取内容；历史引用文件会根据当前问题自动匹配并重新读取。',
+              '用户显式引用的文件内容会由系统读取后提供给你；用户消息语义里能唯一定位到的文件名或文件主名会自动定位并读取内容；历史引用文件会根据当前问题自动匹配并重新读取。',
               '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件；如果 Office/PDF 提取成功，就直接基于提取文本回答，不要说二进制文件无法读取。',
               '如果用户语义能明确指向某个文件，不要要求用户再引用；只有无法唯一定位文件或文件内容未提供时，才要求用户提供更具体路径、引用文件或粘贴内容。',
-              '你不能直接修改文件，只能生成修改建议。',
-              '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议。',
+              '你不能自己直接修改文件，但系统会在你生成文件操作建议后执行安全应用流程。',
+              '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议；非删除操作会自动应用，不要要求用户再点击确认。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
               'JSON 字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete、rename。',
               'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
               'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自已读取引用文件。',
               'rename 只需要包含 targetPath；filePath 必须来自用户消息路径定位结果或已读取引用文件，不需要 originalHash 或文件内容。',
               'create 必须包含 nextContent，filePath 必须在当前工作区内且是文本文件路径。',
-              '不要一次生成多个文件操作，不要生成 diff。删除文件必须等待用户确认，重命名文件可直接生成建议。',
+              '不要一次生成多个文件操作，不要生成 diff。删除文件必须等待用户确认，重命名、创建和更新文件可直接生成建议并由系统自动应用。',
               '系统会提供当前会话 Memory。Memory 只是辅助上下文；如果 Memory 与当前用户消息或当前文件内容冲突，以当前用户消息和当前文件内容为准。',
               '如果你判断当前会话历史已经过长、旧讨论可以压缩，请在普通回复后追加一个 fenced JSON 块，格式为 ```compact-request。',
               'compact-request JSON 必须为 {"type":"REQUEST_COMPACT","reason":"...","suggestedRange":{"beforeMessageId":"可选消息ID"}}。',

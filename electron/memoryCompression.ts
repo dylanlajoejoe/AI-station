@@ -102,7 +102,8 @@ export type CompressionResult = {
 };
 
 const IMPORTANT_OUTPUT_PATTERNS = [/error/i, /failed/i, /exception/i, /traceback/i, /warning/i, /cannot/i, /not found/i, /expected/i, /actual/i];
-const USER_REQUIREMENT_PATTERNS = [/不要[^，,。.!！?？\n]*/g, /不希望[^，,。.!！?？\n]*/g, /我希望[^，,。.!！?？\n]*/g, /以后[^，,。.!！?？\n]*/g, /记住[^，,。.!！?？\n]*/g, /保持[^，,。.!！?？\n]*/g, /用最简[^，,。.!！?？\n]*/g];
+const USER_REQUIREMENT_PATTERNS = [/不要[^，,。.!！?？\n]*/g, /不希望[^，,。.!！?？\n]*/g, /我希望[^，,。.!！?？\n]*/g, /以后[^，,。.!！?？\n]*/g, /记住[^，,。.!！?？\n]*/g, /保持[^，,。.!！?？\n]*/g, /用最简[^，,。.!！?？\n]*/g, /不需要[^，,。.!！?？\n]*/g, /不用[^，,。.!！?？\n]*/g, /无需[^，,。.!！?？\n]*/g, /非删除[^，,。.!！?？\n]*/g];
+const STALE_CAPABILITY_PATTERNS = [/需要.*(@|引用).*文件/, /再次引用/, /只能生成.*建议/, /需要.*确认后.*执行/, /无法直接读取.*(xlsx|pdf|office|二进制)/i, /二进制格式.*无法.*读取/];
 
 function stableId(value: string) {
   return createHash('sha1').update(value).digest('hex').slice(0, 12);
@@ -164,6 +165,14 @@ function getFilePathFromTool(message: NormalizedMessage) {
   return getString(message.input.filePath) || getString(message.input.file_path) || getString(message.input.path) || getString(message.input.file);
 }
 
+function getTargetPathFromTool(message: NormalizedMessage) {
+  return getString(message.input.targetPath) || getString(message.input.target_path);
+}
+
+function getOperationFromTool(message: NormalizedMessage) {
+  return getString(message.input.operation) || getString(message.input.op);
+}
+
 function classifyTool(message: NormalizedMessage) {
   const name = String(message.toolName || '').toLowerCase();
   const raw = JSON.stringify(message.raw).toLowerCase();
@@ -183,11 +192,15 @@ function extractFiles(messages: NormalizedMessage[]) {
     if (message.role !== 'tool') continue;
 
     const filePath = getFilePathFromTool(message);
+    const targetPath = getTargetPathFromTool(message);
+    const operation = getOperationFromTool(message);
     const type = classifyTool(message);
     if (!filePath) continue;
 
     if (type === 'file_read') read.push(filePath);
-    if (type === 'file_edited') edited.push(filePath);
+    if (type === 'file_edited') {
+      edited.push(operation === 'rename' && targetPath ? targetPath : filePath);
+    }
     if (/denied|skipped|refused/i.test(message.content)) {
       skipped.push({ path: filePath, reason: firstLine(message.content) });
     }
@@ -243,8 +256,14 @@ function extractDecisions(messages: NormalizedMessage[]) {
   for (const message of messages) {
     if (message.role !== 'assistant') continue;
     for (const line of message.content.split(/\r?\n/)) {
-      if (/建议|决定|推荐|采用|不建议|方案是/.test(line)) {
-        decisions.push(line.trim().replace(/^[-*]\s*/, ''));
+      const normalizedLine = line.trim().replace(/^[-*]\s*/, '');
+
+      if (!normalizedLine || STALE_CAPABILITY_PATTERNS.some((pattern) => pattern.test(normalizedLine))) {
+        continue;
+      }
+
+      if (/决定采用|已采用|用户要求|产品约束|实现策略|保留策略/.test(normalizedLine)) {
+        decisions.push(normalizedLine);
       }
     }
   }
@@ -253,21 +272,51 @@ function extractDecisions(messages: NormalizedMessage[]) {
 }
 
 function extractOpenQuestions(messages: NormalizedMessage[]) {
-  return unique(messages.filter((message) => message.role === 'user').flatMap((message) => message.content.split(/\r?\n/).filter((line) => /[?？]/.test(line)).map((line) => line.trim()))).slice(0, 20);
+  const lastMessages = messages.slice(-8);
+  const hasLaterAssistantOrTool = (index: number) => messages.slice(index + 1).some((message) => message.role === 'assistant' || message.role === 'tool');
+
+  return unique(messages.flatMap((message, index) => {
+    if (message.role !== 'user' || !lastMessages.includes(message) || hasLaterAssistantOrTool(index)) {
+      return [];
+    }
+
+    return message.content.split(/\r?\n/).filter((line) => /[?？]/.test(line)).map((line) => line.trim());
+  })).slice(0, 5);
+}
+
+function extractEditOperations(messages: NormalizedMessage[]) {
+  return messages.filter((message) => message.role === 'tool' && classifyTool(message) === 'file_edited').map((message) => ({
+    operation: getOperationFromTool(message) || 'update',
+    filePath: getFilePathFromTool(message),
+    targetPath: getTargetPathFromTool(message)
+  })).filter((operation) => operation.filePath);
+}
+
+function formatCompletedEdit(operation: { operation: string; filePath: string | null; targetPath: string | null }) {
+  const fileName = operation.filePath ? operation.filePath.split(/[\\/]/).pop() ?? operation.filePath : 'file';
+  const targetName = operation.targetPath ? operation.targetPath.split(/[\\/]/).pop() ?? operation.targetPath : null;
+
+  if (operation.operation === 'rename' && targetName) return `Renamed ${fileName} to ${targetName}`;
+  if (operation.operation === 'create') return `Created ${fileName}`;
+  if (operation.operation === 'delete') return `Deleted ${fileName}`;
+  return `Updated ${fileName}`;
 }
 
 function buildTaskState(messages: NormalizedMessage[], files: CompressionResult['fileIndex'], commands: CompressedCommand[], userRequirements: string[]) {
   const lastUser = [...messages].reverse().find((message) => message.role === 'user');
   const failedCommands = commands.filter((command) => command.status === 'failed');
-  const hasEditedFiles = files.edited.length > 0;
+  const editOperations = extractEditOperations(messages);
+  const completedEdits = editOperations.map(formatCompletedEdit);
+  const hasEditedFiles = completedEdits.length > 0;
   const hasSuccessfulValidation = commands.some((command) => command.status === 'success' && /test|build|lint|check/i.test(command.command));
+  const needsValidation = hasEditedFiles && commands.length > 0 && !hasSuccessfulValidation;
 
   return {
     goal: lastUser ? firstLine(lastUser.content) : null,
     requirements: userRequirements,
-    completed: hasEditedFiles ? [`Edited ${files.edited.length} file(s)`] : [],
+    completed: unique(completedEdits),
     inProgress: null,
-    pendingValidation: hasEditedFiles && !hasSuccessfulValidation ? ['Run relevant validation'] : [],
+    pendingValidation: needsValidation ? ['Run relevant validation'] : [],
     relatedFiles: unique([...files.read, ...files.edited]),
     editedFiles: files.edited,
     blockers: failedCommands.map((command) => `${command.command} failed`),
@@ -288,7 +337,10 @@ function buildEvents(messages: NormalizedMessage[], files: CompressionResult['fi
     if (message.role === 'user') events.push(event(index++, 'user_request', null, firstLine(message.content), message.id, message.createdAt || now));
   }
   for (const filePath of files.read) events.push(event(index++, 'file_read', filePath, `Read ${filePath}`, null, now));
-  for (const filePath of files.edited) events.push(event(index++, 'file_edited', filePath, `Edited ${filePath}`, null, now));
+  for (const editOperation of extractEditOperations(messages)) {
+    const target = editOperation.operation === 'rename' && editOperation.targetPath ? editOperation.targetPath : editOperation.filePath;
+    events.push(event(index++, `file_${editOperation.operation}`, target ?? null, formatCompletedEdit(editOperation), null, now));
+  }
   for (const command of commands) events.push(event(index++, /test|build|lint|check/i.test(command.command) ? 'test_result' : 'command_run', command.command, `${command.status}: ${command.command}`, null, now));
   for (const blocker of taskState.blockers) events.push(event(index++, 'blocker', null, blocker, null, now));
 

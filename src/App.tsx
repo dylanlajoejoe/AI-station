@@ -1446,7 +1446,11 @@ export function App() {
         }
       ]);
       if (result.fileEditSuggestion) {
-        setFileEditSuggestions((currentSuggestions) => [...currentSuggestions, result.fileEditSuggestion as FileEditSuggestion]);
+        const suggestion = result.fileEditSuggestion as FileEditSuggestion;
+        setFileEditSuggestions((currentSuggestions) => [...currentSuggestions, suggestion]);
+        if (suggestion.operation !== 'delete') {
+          void handleApplyFileEdit(suggestion);
+        }
       }
       setSelectedFiles([]);
       void window.aiWorkspace.listSessions().then(setSessions);
