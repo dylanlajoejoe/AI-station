@@ -227,6 +227,47 @@ textarea:focus-visible {
   font-size: 13px;
 }
 
+.file-edit-compare {
+  display: grid;
+  gap: 8px;
+}
+
+.file-edit-compare-pane {
+  overflow: hidden;
+  border: 1px solid #d7e4df;
+  border-radius: 12px;
+  background: #fffdf8;
+}
+
+.file-edit-compare-pane.before {
+  border-color: rgba(159, 47, 47, 0.22);
+}
+
+.file-edit-compare-pane.after {
+  border-color: rgba(47, 107, 79, 0.28);
+}
+
+.file-edit-compare-title {
+  padding: 7px 9px;
+  border-bottom: 1px solid #e4ece8;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.file-edit-compare-pane pre {
+  overflow: auto;
+  max-height: 180px;
+  margin: 0;
+  padding: 9px;
+  background: transparent;
+  color: #263237;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .file-edit-suggestion button {
   justify-self: start;
   border: 0;
@@ -407,6 +448,39 @@ textarea:focus-visible {
   color: white;
   font-size: 10px;
   font-weight: 700;
+}
+
+.capability-mark,
+.selected-file-status {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.capability-mark.editable,
+.selected-file-status.editable {
+  background: #eef5f2;
+  color: var(--green);
+}
+
+.capability-mark.readonly,
+.selected-file-status.readonly {
+  background: #eaf0f2;
+  color: var(--blue);
+}
+
+.capability-mark.warning,
+.selected-file-status.warning {
+  background: rgba(183, 121, 31, 0.12);
+  color: var(--amber);
+}
+
+.capability-mark.unsupported,
+.selected-file-status.unsupported {
+  background: rgba(159, 47, 47, 0.1);
+  color: #9f2f2f;
 }
 
 .tree-empty {
@@ -889,6 +963,11 @@ textarea:focus-visible {
   line-height: 22px;
 }
 
+.selected-file-status {
+  margin-left: 5px;
+  line-height: 1;
+}
+
 .remove-reference-button {
   position: absolute;
   top: -6px;
@@ -1163,6 +1242,138 @@ textarea:focus-visible {
   background: rgba(255, 250, 241, 0.86);
   color: var(--muted);
   font-size: 12px;
+}
+
+.memory-debug-button {
+  border: 0;
+  border-radius: 12px;
+  padding: 9px 11px;
+  background: #dfe9e6;
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.memory-debug-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(47, 52, 55, 0.38);
+}
+
+.memory-debug-modal {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  width: min(920px, 92vw);
+  max-height: 86vh;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #fffdf8;
+  box-shadow: 0 24px 70px rgba(47, 52, 55, 0.28);
+}
+
+.memory-debug-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+  background: #eef5f2;
+}
+
+.memory-debug-header p {
+  margin: 0 0 4px;
+  color: var(--blue);
+  font-weight: 900;
+}
+
+.memory-debug-header span,
+.memory-debug-content small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memory-debug-header button {
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: var(--blue);
+  color: white;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.memory-debug-content {
+  display: grid;
+  gap: 12px;
+  overflow: auto;
+  padding: 16px;
+}
+
+.memory-debug-content section {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e0e8e5;
+  border-radius: 14px;
+  background: #fffaf1;
+}
+
+.memory-debug-content h3 {
+  margin: 0;
+  color: var(--green);
+  font-size: 14px;
+}
+
+.memory-debug-json {
+  overflow: auto;
+  max-height: 260px;
+  margin: 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: #f3f6f4;
+  color: #263135;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.memory-debug-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.memory-debug-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #f3f6f4;
+  font-size: 12px;
+}
+
+.memory-debug-row strong {
+  color: var(--blue);
+}
+
+.memory-debug-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 1120px) {

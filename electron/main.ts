@@ -3,10 +3,14 @@ import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import { watch } from 'fs';
 import { mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'fs/promises';
+import { OfficeParser } from 'officeparser';
 import path from 'path';
+import WordExtractor from 'word-extractor';
+import { compressTranscript, type CompressionInputMessage, type CompressionResult } from './memoryCompression.js';
 
 const isDev = !app.isPackaged;
 const maxPreviewFileSize = 1024 * 1024;
+const maxOfficePreviewFileSize = 10 * 1024 * 1024;
 const previewableTextExtensions = new Set([
   '.txt',
   '.md',
@@ -105,11 +109,17 @@ type FileEditSuggestion = {
   targetPath: string | null;
   fileName: string;
   originalHash: string | null;
+  originalContent: string | null;
   proposedContent: string | null;
   proposedHash: string | null;
   summary: string;
   status: 'suggested' | 'applied' | 'failed';
   messageId: string | null;
+};
+
+type CompactRequest = {
+  reason: string;
+  beforeMessageId: string | null;
 };
 
 type ApplyFileEditParams = {
@@ -143,7 +153,16 @@ type ChatCompletionChunk = {
     delta?: {
       content?: string;
     };
+    message?: {
+      content?: string;
+    };
   }>;
+};
+
+type CompactRequestEventRow = {
+  id: string;
+  payload_json: string;
+  created_at: string;
 };
 
 type SessionRow = {
@@ -162,6 +181,53 @@ type MessageRow = {
   created_at: string;
 };
 
+type TaskStateRow = {
+  session_id: string;
+  state_json: string;
+  updated_at: string;
+};
+
+type ContextPackRow = {
+  id: string;
+  session_id: string;
+  from_message_id: string | null;
+  to_message_id: string | null;
+  pack_json: string;
+  created_at: string;
+};
+
+type RollingSummaryRow = {
+  id: string;
+  session_id: string;
+  from_message_id: string | null;
+  to_message_id: string | null;
+  summary: string;
+  source_pack_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type FileIndexRow = {
+  id: string;
+  session_id: string;
+  file_path: string;
+  operation: string;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type CommandLogRow = {
+  id: string;
+  session_id: string;
+  command: string;
+  cwd: string | null;
+  exit_code: number | null;
+  status: string;
+  important_output_json: string;
+  created_at: string;
+};
+
 type AiConfig = {
   baseUrl: string;
   apiKey: string;
@@ -171,6 +237,9 @@ type AiConfig = {
 
 const maxWorkspaceTreeEntries = 300;
 const maxWorkspaceTreeDepth = 3;
+const compactMessageThreshold = 80;
+const compactTokenThreshold = 60000;
+const compactToolOutputCharThreshold = 120000;
 const sensitiveFileNames = new Set([
   '.env',
   '.env.local',
@@ -190,6 +259,7 @@ const ignoredDirectoryNames = new Set([
   'out',
   '.vite'
 ]);
+const previewableOfficeExtensions = new Set(['.doc', '.docx', '.xlsx', '.ppt', '.pptx', '.pdf']);
 
 let aiConfig: Partial<AiConfig> = {
   baseUrl: process.env.AI_BASE_URL,
@@ -302,6 +372,471 @@ function recordSessionEvent(sessionId: string, type: string, payload: unknown) {
   return mapSessionEvent(event);
 }
 
+function getSessionTranscriptForMemory(sessionId: string): CompressionInputMessage[] {
+  const messages = db.prepare(`
+    SELECT id, role, content, created_at
+    FROM messages
+    WHERE session_id = ?
+    ORDER BY created_at ASC
+  `).all(sessionId) as Array<Pick<MessageRow, 'id' | 'role' | 'content' | 'created_at'>>;
+  const events = db.prepare(`
+    SELECT id, type, payload_json, created_at
+    FROM session_events
+    WHERE session_id = ?
+    ORDER BY created_at ASC
+  `).all(sessionId) as Array<Pick<SessionEventRow, 'id' | 'type' | 'payload_json' | 'created_at'>>;
+  const transcript: Array<CompressionInputMessage & { sortAt: string }> = [];
+
+  for (const message of messages) {
+    transcript.push({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      createdAt: message.created_at,
+      sortAt: message.created_at
+    });
+  }
+
+  for (const event of events) {
+    let payload: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(event.payload_json) as unknown;
+      payload = typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {};
+    } catch {
+      payload = {};
+    }
+
+    if (event.type === 'referenced_files_read') {
+      const files = Array.isArray(payload.files) ? payload.files : [];
+      for (const file of files) {
+        if (typeof file !== 'object' || file === null) continue;
+        const fileRecord = file as Record<string, unknown>;
+        transcript.push({
+          id: `${event.id}:${String(fileRecord.path ?? fileRecord.name ?? 'file')}`,
+          role: 'tool',
+          toolName: 'read',
+          input: { filePath: fileRecord.path },
+          output: fileRecord.message,
+          createdAt: event.created_at,
+          sortAt: event.created_at
+        });
+      }
+    } else if (event.type === 'file_edit_applied' || event.type === 'file_edit_suggested' || event.type === 'file_edit_failed') {
+      transcript.push({
+        id: event.id,
+        role: 'tool',
+        toolName: event.type === 'file_edit_suggested' ? 'edit_suggestion' : 'edit',
+        input: { filePath: payload.filePath, targetPath: payload.targetPath },
+        output: payload.summary ?? payload.message ?? event.type,
+        createdAt: event.created_at,
+        sortAt: event.created_at
+      });
+    }
+  }
+
+  return transcript.sort((left, right) => left.sortAt.localeCompare(right.sortAt)).map(({ sortAt: _sortAt, ...message }) => message);
+}
+
+function replaceJsonRow(tableName: string, columns: string[], values: Record<string, unknown>) {
+  const columnList = columns.join(', ');
+  const placeholderList = columns.map((column) => `@${column}`).join(', ');
+  db.prepare(`DELETE FROM ${tableName} WHERE session_id = @session_id`).run(values);
+  db.prepare(`INSERT INTO ${tableName} (${columnList}) VALUES (${placeholderList})`).run(values);
+}
+
+function saveMemoryCompressionResult(result: CompressionResult) {
+  const now = new Date().toISOString();
+
+  replaceJsonRow('task_state', ['session_id', 'state_json', 'updated_at'], {
+    session_id: result.sessionId,
+    state_json: JSON.stringify(result.taskState),
+    updated_at: now
+  });
+
+  db.prepare('DELETE FROM file_index WHERE session_id = ?').run(result.sessionId);
+  const insertFileIndex = db.prepare(`
+    INSERT INTO file_index (id, session_id, task_id, file_path, operation, reason, symbols_json, content_hash, mtime, created_at, updated_at)
+    VALUES (@id, @session_id, @task_id, @file_path, @operation, @reason, @symbols_json, @content_hash, @mtime, @created_at, @updated_at)
+  `);
+  for (const filePath of result.fileIndex.read) {
+    insertFileIndex.run({ id: createId('file-index'), session_id: result.sessionId, task_id: null, file_path: filePath, operation: 'read', reason: null, symbols_json: '[]', content_hash: null, mtime: null, created_at: now, updated_at: now });
+  }
+  for (const filePath of result.fileIndex.edited) {
+    insertFileIndex.run({ id: createId('file-index'), session_id: result.sessionId, task_id: null, file_path: filePath, operation: 'edited', reason: null, symbols_json: '[]', content_hash: null, mtime: null, created_at: now, updated_at: now });
+  }
+  for (const skipped of result.fileIndex.skipped) {
+    insertFileIndex.run({ id: createId('file-index'), session_id: result.sessionId, task_id: null, file_path: skipped.path, operation: 'skipped', reason: skipped.reason, symbols_json: '[]', content_hash: null, mtime: null, created_at: now, updated_at: now });
+  }
+
+  db.prepare('DELETE FROM command_log WHERE session_id = ?').run(result.sessionId);
+  const insertCommandLog = db.prepare(`
+    INSERT INTO command_log (id, session_id, command, cwd, exit_code, status, important_output_json, created_at)
+    VALUES (@id, @session_id, @command, @cwd, @exit_code, @status, @important_output_json, @created_at)
+  `);
+  for (const command of result.commandLog) {
+    insertCommandLog.run({ id: createId('command'), session_id: result.sessionId, command: command.command, cwd: command.cwd, exit_code: command.exitCode, status: command.status, important_output_json: JSON.stringify(command.importantOutput), created_at: now });
+  }
+
+  db.prepare('DELETE FROM context_pack WHERE session_id = ?').run(result.sessionId);
+  db.prepare(`
+    INSERT INTO context_pack (id, session_id, from_message_id, to_message_id, pack_json, created_at)
+    VALUES (@id, @session_id, @from_message_id, @to_message_id, @pack_json, @created_at)
+  `).run({
+    id: createId('context-pack'),
+    session_id: result.sessionId,
+    from_message_id: result.contextPack.range.fromMessageId,
+    to_message_id: result.contextPack.range.toMessageId,
+    pack_json: JSON.stringify(result.contextPack),
+    created_at: now
+  });
+}
+
+function estimateMemoryTokens(transcript: CompressionInputMessage[]) {
+  const text = transcript.map((message) => [message.content, message.output, message.result].filter(Boolean).join('\n')).join('\n');
+
+  return Math.ceil(text.length / 4);
+}
+
+function getToolOutputChars(transcript: CompressionInputMessage[]) {
+  return transcript.reduce((total, message) => {
+    if (message.role !== 'tool') return total;
+    return total + String(message.output ?? message.result ?? message.content ?? '').length;
+  }, 0);
+}
+
+function getLastSummarizedMessageId(sessionId: string) {
+  const row = db.prepare(`
+    SELECT last_summarized_message_id
+    FROM compact_boundary
+    WHERE session_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(sessionId) as { last_summarized_message_id: string | null } | undefined;
+
+  return row?.last_summarized_message_id ?? null;
+}
+
+function getHistoryMessagesForModel(sessionId: string) {
+  const lastSummarizedMessageId = getLastSummarizedMessageId(sessionId);
+  const messages = db.prepare(`
+    SELECT id, session_id, role, content, created_at
+    FROM messages
+    WHERE session_id = ?
+    ORDER BY created_at ASC
+  `).all(sessionId) as MessageRow[];
+  const startIndex = lastSummarizedMessageId
+    ? messages.findIndex((message) => message.id === lastSummarizedMessageId) + 1
+    : Math.max(0, messages.length - 20);
+  const safeStartIndex = startIndex > 0 ? startIndex : Math.max(0, messages.length - 20);
+
+  return messages.slice(safeStartIndex).slice(-20).map((message) => ({
+    role: message.role,
+    content: message.content
+  }));
+}
+
+function countMessagesAfterBoundary(transcript: CompressionInputMessage[], lastSummarizedMessageId: string | null) {
+  const chatMessages = transcript.filter((message) => message.role === 'user' || message.role === 'assistant');
+  if (!lastSummarizedMessageId) return chatMessages.length;
+
+  const boundaryIndex = chatMessages.findIndex((message) => message.id === lastSummarizedMessageId);
+  if (boundaryIndex === -1) return chatMessages.length;
+
+  return chatMessages.length - boundaryIndex - 1;
+}
+
+function hasCompactRequestForMessage(sessionId: string, toMessageId: string | null) {
+  if (!toMessageId) return false;
+
+  const rows = db.prepare(`
+    SELECT payload_json
+    FROM session_events
+    WHERE session_id = ? AND type = 'compact_requested'
+    ORDER BY created_at DESC
+    LIMIT 10
+  `).all(sessionId) as Array<{ payload_json: string }>;
+
+  return rows.some((row) => {
+    const payload = safeJsonParse(row.payload_json) as Record<string, unknown> | null;
+    return payload?.toMessageId === toMessageId;
+  });
+}
+
+function maybeRecordProgramCompactRequest(sessionId: string, transcript: CompressionInputMessage[], result: CompressionResult) {
+  const lastSummarizedMessageId = getLastSummarizedMessageId(sessionId);
+  const uncompressedMessageCount = countMessagesAfterBoundary(transcript, lastSummarizedMessageId);
+  const estimatedTokens = estimateMemoryTokens(transcript);
+  const toolOutputChars = getToolOutputChars(transcript);
+  const reasons: string[] = [];
+
+  if (uncompressedMessageCount > compactMessageThreshold) {
+    reasons.push(`未压缩消息数 ${uncompressedMessageCount} 超过 ${compactMessageThreshold}`);
+  }
+  if (estimatedTokens > compactTokenThreshold) {
+    reasons.push(`估算上下文 ${estimatedTokens} tokens 超过 ${compactTokenThreshold}`);
+  }
+  if (toolOutputChars > compactToolOutputCharThreshold) {
+    reasons.push(`工具输出 ${toolOutputChars} 字符超过 ${compactToolOutputCharThreshold}`);
+  }
+
+  if (reasons.length === 0 || hasCompactRequestForMessage(sessionId, result.contextPack.range.toMessageId)) {
+    return;
+  }
+
+  recordSessionEvent(sessionId, 'compact_requested', {
+    source: 'program',
+    status: 'pending',
+    reasons,
+    fromMessageId: result.contextPack.range.fromMessageId,
+    toMessageId: result.contextPack.range.toMessageId,
+    lastSummarizedMessageId,
+    metrics: {
+      uncompressedMessageCount,
+      estimatedTokens,
+      toolOutputChars
+    }
+  });
+}
+
+function getPendingCompactRequest(sessionId: string) {
+  const rows = db.prepare(`
+    SELECT id, payload_json, created_at
+    FROM session_events
+    WHERE session_id = ? AND type = 'compact_requested'
+    ORDER BY created_at DESC
+    LIMIT 20
+  `).all(sessionId) as CompactRequestEventRow[];
+
+  const statusRows = db.prepare(`
+    SELECT payload_json
+    FROM session_events
+    WHERE session_id = ? AND type = 'compact_request_status'
+    ORDER BY created_at DESC
+    LIMIT 50
+  `).all(sessionId) as Array<{ payload_json: string }>;
+  const handledRequestIds = new Set<string>();
+
+  for (const row of statusRows) {
+    const payload = safeJsonParse(row.payload_json) as Record<string, unknown> | null;
+    if (typeof payload?.requestEventId === 'string') {
+      handledRequestIds.add(payload.requestEventId);
+    }
+  }
+
+  return rows.find((row) => {
+    if (handledRequestIds.has(row.id)) return false;
+    const payload = safeJsonParse(row.payload_json) as Record<string, unknown> | null;
+    return payload?.status === 'pending';
+  }) ?? null;
+}
+
+function getLatestContextPack(sessionId: string) {
+  return db.prepare(`
+    SELECT id, session_id, from_message_id, to_message_id, pack_json, created_at
+    FROM context_pack
+    WHERE session_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(sessionId) as ContextPackRow | undefined;
+}
+
+function markCompactRequestStatus(sessionId: string, request: CompactRequestEventRow, status: 'completed' | 'failed', extra: Record<string, unknown>) {
+  const payload = safeJsonParse(request.payload_json) as Record<string, unknown> | null;
+  recordSessionEvent(sessionId, 'compact_request_status', {
+    requestEventId: request.id,
+    status,
+    originalRequest: payload,
+    ...extra
+  });
+}
+
+function saveRollingSummary(sessionId: string, contextPack: ContextPackRow, summary: string, tokenCount: number | null) {
+  const now = new Date().toISOString();
+  const summaryId = createId('summary');
+
+  db.prepare(`
+    INSERT INTO rolling_summary (id, session_id, from_message_id, to_message_id, summary, source_pack_id, created_at, updated_at)
+    VALUES (@id, @session_id, @from_message_id, @to_message_id, @summary, @source_pack_id, @created_at, @updated_at)
+  `).run({
+    id: summaryId,
+    session_id: sessionId,
+    from_message_id: contextPack.from_message_id,
+    to_message_id: contextPack.to_message_id,
+    summary,
+    source_pack_id: contextPack.id,
+    created_at: now,
+    updated_at: now
+  });
+  db.prepare(`
+    INSERT INTO compact_boundary (id, session_id, summary_id, last_summarized_message_id, pre_compact_token_count, created_at)
+    VALUES (@id, @session_id, @summary_id, @last_summarized_message_id, @pre_compact_token_count, @created_at)
+  `).run({
+    id: createId('compact-boundary'),
+    session_id: sessionId,
+    summary_id: summaryId,
+    last_summarized_message_id: contextPack.to_message_id,
+    pre_compact_token_count: tokenCount,
+    created_at: now
+  });
+
+  return summaryId;
+}
+
+function buildRollingSummaryPrompt(contextPackJson: string) {
+  return [
+    '请基于下面的 context_pack 生成当前会话滚动摘要。',
+    '要求：',
+    '- 简洁、事实化',
+    '- 保留用户明确要求',
+    '- 保留任务目标和当前进度',
+    '- 保留重要决策、已读/已改文件、待验证项、阻塞点',
+    '- 不要包含 API Key、Token、密码、私钥',
+    '- 不要复述大段文件内容',
+    '- 输出纯文本，不要 Markdown 表格，不要 JSON',
+    '',
+    'context_pack:',
+    contextPackJson
+  ].join('\n');
+}
+
+async function generateRollingSummaryFromPendingCompact(sessionId: string) {
+  const request = getPendingCompactRequest(sessionId);
+  if (!request) return;
+
+  const contextPack = getLatestContextPack(sessionId);
+  if (!contextPack) {
+    markCompactRequestStatus(sessionId, request, 'failed', { message: '缺少 context_pack' });
+    return;
+  }
+
+  try {
+    const baseUrl = String(getRequiredConfig('baseUrl', 'AI Base URL')).replace(/\/$/, '');
+    const apiKey = String(getRequiredConfig('apiKey', 'AI API Key'));
+    const model = String(getRequiredConfig('model', 'AI Model'));
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        messages: [
+          {
+            role: 'system',
+            content: '你是会话记忆压缩器，只负责把结构化上下文压缩成可靠摘要。'
+          },
+          {
+            role: 'user',
+            content: buildRollingSummaryPrompt(contextPack.pack_json)
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`AI 摘要接口请求失败：${response.status}`);
+    }
+
+    const summary = await readNonStreamingChatResponse(response);
+    const summaryId = saveRollingSummary(sessionId, contextPack, summary, null);
+    markCompactRequestStatus(sessionId, request, 'completed', { summaryId });
+  } catch (error) {
+    markCompactRequestStatus(sessionId, request, 'failed', {
+      message: error instanceof Error ? error.message : '生成滚动摘要失败'
+    });
+  }
+}
+
+function updateSessionMemory(sessionId: string) {
+  const transcript = getSessionTranscriptForMemory(sessionId);
+  const result = compressTranscript({ sessionId, messages: transcript });
+  saveMemoryCompressionResult(result);
+  maybeRecordProgramCompactRequest(sessionId, transcript, result);
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function formatStringList(title: string, values: unknown, maxItems = 8) {
+  if (!Array.isArray(values) || values.length === 0) return '';
+  const lines = values.slice(0, maxItems).map((value) => `- ${String(value)}`);
+  return [`${title}:`, ...lines].join('\n');
+}
+
+function formatMemoryContext(sessionId: string) {
+  const taskStateRow = db.prepare(`
+    SELECT session_id, state_json, updated_at
+    FROM task_state
+    WHERE session_id = ?
+  `).get(sessionId) as TaskStateRow | undefined;
+  const contextPackRow = db.prepare(`
+    SELECT id, session_id, from_message_id, to_message_id, pack_json, created_at
+    FROM context_pack
+    WHERE session_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(sessionId) as ContextPackRow | undefined;
+  const rollingSummaryRow = db.prepare(`
+    SELECT id, session_id, from_message_id, to_message_id, summary, source_pack_id, created_at, updated_at
+    FROM rolling_summary
+    WHERE session_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(sessionId) as RollingSummaryRow | undefined;
+  const parts: string[] = [];
+
+  if (taskStateRow) {
+    const taskState = safeJsonParse(taskStateRow.state_json) as Record<string, unknown> | null;
+    if (taskState) {
+      const taskParts = [
+        `目标：${String(taskState.goal ?? '未记录')}`,
+        formatStringList('用户要求', taskState.requirements),
+        formatStringList('已完成', taskState.completed),
+        formatStringList('待验证', taskState.pendingValidation),
+        formatStringList('阻塞点', taskState.blockers),
+        formatStringList('相关文件', taskState.relatedFiles)
+      ].filter(Boolean);
+      parts.push(['[current_task]', ...taskParts].join('\n'));
+    }
+  }
+
+  if (rollingSummaryRow?.summary.trim()) {
+    parts.push(['[rolling_summary]', rollingSummaryRow.summary.trim()].join('\n'));
+  }
+
+  if (contextPackRow) {
+    const contextPack = safeJsonParse(contextPackRow.pack_json) as Record<string, unknown> | null;
+    const packParts: string[] = [];
+    if (contextPack) {
+      packParts.push(formatStringList('历史用户要求', contextPack.userRequirements));
+      packParts.push(formatStringList('历史决策', contextPack.decisions));
+      packParts.push(formatStringList('未解决问题', contextPack.openQuestions));
+      const files = contextPack.files as Record<string, unknown> | undefined;
+      if (files) {
+        packParts.push(formatStringList('读过文件', files.read));
+        packParts.push(formatStringList('改过文件', files.edited));
+      }
+    }
+    const compactPack = packParts.filter(Boolean).join('\n');
+    if (compactPack) {
+      parts.push(['[compressed_context]', compactPack].join('\n'));
+    }
+  }
+
+  if (parts.length === 0) {
+    return '当前会话暂无可用 Memory。';
+  }
+
+  return parts.join('\n\n');
+}
+
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -359,6 +894,60 @@ function hashTextContent(content: string) {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
+function getFileContentKind(filePath: string) {
+  const extension = path.extname(filePath).toLowerCase();
+
+  if (previewableTextExtensions.has(extension)) {
+    return 'text' as const;
+  }
+
+  if (previewableOfficeExtensions.has(extension)) {
+    return 'office' as const;
+  }
+
+  return 'unsupported' as const;
+}
+
+async function readDocText(filePath: string) {
+  const extractor = new WordExtractor();
+  const document = await extractor.extract(filePath);
+
+  return [
+    document.getBody(),
+    document.getHeaders(),
+    document.getFooters(),
+    document.getFootnotes(),
+    document.getEndnotes(),
+    document.getAnnotations(),
+    document.getTextboxes()
+  ].filter(Boolean).join('\n\n').trim();
+}
+
+async function readOfficeText(filePath: string, enableOcr: boolean) {
+  const extension = path.extname(filePath).toLowerCase();
+
+  if (extension === '.doc') {
+    return readDocText(filePath);
+  }
+
+  const ast = await OfficeParser.parseOffice(filePath, {
+    ocr: enableOcr,
+    ocrConfig: enableOcr ? {
+      language: 'chi_sim+eng',
+      timeout: {
+        workerLoad: 60000,
+        recognition: 30000,
+        autoTerminate: 10000
+      }
+    } : undefined,
+    ignoreComments: true,
+    ignoreHeadersAndFooters: false
+  });
+  const result = await ast.to('text');
+
+  return typeof result.value === 'string' ? result.value.trim() : '';
+}
+
 function isSensitivePath(workspacePath: string, targetPath: string) {
   const relativePath = path.relative(path.resolve(workspacePath), path.resolve(targetPath));
   const segments = relativePath.split(path.sep).filter(Boolean);
@@ -388,6 +977,58 @@ async function assertEditableTextFile(filePath: string) {
   }
 
   return fileStat;
+}
+
+async function readPreviewableFile(filePath: string, enableOcr = false) {
+  const fileStat = await stat(filePath);
+
+  if (!fileStat.isFile()) {
+    throw new Error('当前选择的不是文件');
+  }
+
+  const contentKind = getFileContentKind(filePath);
+
+  if (contentKind === 'text') {
+    if (fileStat.size > maxPreviewFileSize) {
+      throw new Error('文件超过 1MB，暂不支持读取');
+    }
+
+    const content = await readFile(filePath, 'utf8');
+
+    return {
+      content,
+      originalHash: hashTextContent(content),
+      size: fileStat.size,
+      modifiedAt: fileStat.mtime.toISOString(),
+      isEditable: true,
+      contentKind,
+      ocrEnabled: false
+    };
+  }
+
+  if (contentKind === 'office') {
+    if (fileStat.size > maxOfficePreviewFileSize) {
+      throw new Error('Office 文件超过 10MB，暂不支持读取');
+    }
+
+    const content = await readOfficeText(filePath, enableOcr);
+
+    if (!content) {
+      throw new Error('未能从该 Office 文件提取到文本内容');
+    }
+
+    return {
+      content,
+      originalHash: hashTextContent(content),
+      size: fileStat.size,
+      modifiedAt: fileStat.mtime.toISOString(),
+      isEditable: false,
+      contentKind,
+      ocrEnabled: enableOcr
+    };
+  }
+
+  throw new Error('该文件类型暂不支持读取');
 }
 
 function assertTextFileExtension(filePath: string) {
@@ -727,21 +1368,19 @@ async function readReferencedFiles(
         continue;
       }
 
-      if (fileStat.size > maxPreviewFileSize) {
+      if (fileStat.size > maxOfficePreviewFileSize) {
         results.push({
           name: file.name,
           path: resolvedPath,
           status: 'skipped',
           content: null,
           originalHash: null,
-          message: '文件超过 1MB，已拒绝读取'
+          message: '文件超过 10MB，已拒绝读取'
         });
         continue;
       }
 
-      const extension = path.extname(resolvedPath).toLowerCase();
-
-      if (!previewableTextExtensions.has(extension)) {
+      if (getFileContentKind(resolvedPath) === 'unsupported') {
         results.push({
           name: file.name,
           path: resolvedPath,
@@ -753,15 +1392,15 @@ async function readReferencedFiles(
         continue;
       }
 
-      const content = await readFile(resolvedPath, 'utf8');
+      const preview = await readPreviewableFile(resolvedPath);
 
       results.push({
         name: file.name,
         path: resolvedPath,
         status: 'read',
-        content,
-        originalHash: hashTextContent(content),
-        message: '已读取引用文件内容'
+        content: preview.content,
+        originalHash: preview.originalHash,
+        message: preview.isEditable ? '已读取引用文件内容' : '已提取 Office 文件文本内容'
       });
     } catch {
       results.push({
@@ -862,6 +1501,7 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
       targetPath: null,
       fileName: path.basename(candidate.filePath),
       originalHash: null,
+      originalContent: null,
       proposedContent: candidate.nextContent,
       proposedHash: hashTextContent(candidate.nextContent),
       summary: candidate.summary.slice(0, 500),
@@ -891,6 +1531,7 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
       targetPath: null,
       fileName: file.name,
       originalHash: candidate.originalHash,
+      originalContent: file.content,
       proposedContent: null,
       proposedHash: null,
       summary: candidate.summary.slice(0, 500),
@@ -912,6 +1553,7 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
       targetPath: candidate.targetPath,
       fileName: file.name,
       originalHash: candidate.originalHash,
+      originalContent: file.content,
       proposedContent: null,
       proposedHash: null,
       summary: candidate.summary.slice(0, 500),
@@ -932,6 +1574,7 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
     targetPath: null,
     fileName: file.name,
     originalHash: candidate.originalHash,
+    originalContent: file.content,
     proposedContent: candidate.nextContent,
     proposedHash: hashTextContent(candidate.nextContent),
     summary: candidate.summary.slice(0, 500),
@@ -942,6 +1585,45 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
 
 function stripFileEditSuggestionBlock(content: string) {
   return content.replace(/```file-edit-suggestion\s*[\s\S]*?```/g, '').trim();
+}
+
+function parseCompactRequest(content: string): CompactRequest | null {
+  const match = content.match(/```compact-request\s*([\s\S]*?)```/);
+
+  if (!match) {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+
+  const candidate = parsed as { type?: unknown; reason?: unknown; suggestedRange?: { beforeMessageId?: unknown } };
+
+  if (candidate.type !== 'REQUEST_COMPACT' || typeof candidate.reason !== 'string') {
+    return null;
+  }
+
+  const beforeMessageId = typeof candidate.suggestedRange?.beforeMessageId === 'string'
+    ? candidate.suggestedRange.beforeMessageId
+    : null;
+
+  return {
+    reason: candidate.reason.slice(0, 500),
+    beforeMessageId
+  };
+}
+
+function stripCompactRequestBlock(content: string) {
+  return content.replace(/```compact-request\s*[\s\S]*?```/g, '').trim();
 }
 
 function mergeReferencedFilesWithLocatedPaths(
@@ -1101,6 +1783,81 @@ function initDatabase() {
       created_at TEXT NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id)
     );
+
+    CREATE TABLE IF NOT EXISTS task_state (
+      session_id TEXT PRIMARY KEY,
+      state_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS file_index (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      task_id TEXT,
+      file_path TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      reason TEXT,
+      symbols_json TEXT NOT NULL DEFAULT '[]',
+      content_hash TEXT,
+      mtime TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS command_log (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      command TEXT NOT NULL,
+      cwd TEXT,
+      exit_code INTEGER,
+      status TEXT NOT NULL,
+      important_output_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS context_pack (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      from_message_id TEXT,
+      to_message_id TEXT,
+      pack_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rolling_summary (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      from_message_id TEXT,
+      to_message_id TEXT,
+      summary TEXT NOT NULL,
+      source_pack_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id),
+      FOREIGN KEY (source_pack_id) REFERENCES context_pack(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS compact_boundary (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      summary_id TEXT,
+      last_summarized_message_id TEXT,
+      pre_compact_token_count INTEGER,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id),
+      FOREIGN KEY (summary_id) REFERENCES rolling_summary(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_events_session_id_created_at ON session_events(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_file_index_session_id_path ON file_index(session_id, file_path);
+    CREATE INDEX IF NOT EXISTS idx_command_log_session_id_created_at ON command_log(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_context_pack_session_id_created_at ON context_pack(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_rolling_summary_session_id_updated_at ON rolling_summary(session_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_compact_boundary_session_id_created_at ON compact_boundary(session_id, created_at);
   `);
 }
 
@@ -1159,6 +1916,17 @@ async function readStreamingChatResponse(response: Response, onChunk: (content: 
   }
 
   return fullContent.trim();
+}
+
+async function readNonStreamingChatResponse(response: Response) {
+  const parsed = await response.json() as ChatCompletionChunk;
+  const content = parsed.choices?.[0]?.message?.content;
+
+  if (!content?.trim()) {
+    throw new Error('AI 摘要接口未返回内容');
+  }
+
+  return content.trim();
 }
 
 ipcMain.handle('config:getAiConfig', async () => ({
@@ -1266,6 +2034,66 @@ ipcMain.handle('session:getEvents', async (_event, params: { sessionId: string }
   return events.map(mapSessionEvent);
 });
 
+ipcMain.handle('session:getMemory', async (_event, params: { sessionId: string }) => {
+  const taskState = db.prepare(`
+    SELECT session_id, state_json, updated_at
+    FROM task_state
+    WHERE session_id = ?
+  `).get(params.sessionId) as TaskStateRow | undefined;
+  const contextPack = getLatestContextPack(params.sessionId);
+  const rollingSummary = db.prepare(`
+    SELECT id, session_id, from_message_id, to_message_id, summary, source_pack_id, created_at, updated_at
+    FROM rolling_summary
+    WHERE session_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(params.sessionId) as RollingSummaryRow | undefined;
+  const files = db.prepare(`
+    SELECT id, session_id, file_path, operation, reason, created_at, updated_at
+    FROM file_index
+    WHERE session_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 50
+  `).all(params.sessionId) as FileIndexRow[];
+  const commands = db.prepare(`
+    SELECT id, session_id, command, cwd, exit_code, status, important_output_json, created_at
+    FROM command_log
+    WHERE session_id = ?
+    ORDER BY created_at DESC
+    LIMIT 20
+  `).all(params.sessionId) as CommandLogRow[];
+
+  return {
+    taskState: taskState ? safeJsonParse(taskState.state_json) : null,
+    taskStateUpdatedAt: taskState?.updated_at ?? null,
+    contextPack: contextPack ? safeJsonParse(contextPack.pack_json) : null,
+    contextPackCreatedAt: contextPack?.created_at ?? null,
+    rollingSummary: rollingSummary ? {
+      id: rollingSummary.id,
+      summary: rollingSummary.summary,
+      fromMessageId: rollingSummary.from_message_id,
+      toMessageId: rollingSummary.to_message_id,
+      updatedAt: rollingSummary.updated_at
+    } : null,
+    files: files.map((file) => ({
+      id: file.id,
+      path: file.file_path,
+      operation: file.operation,
+      reason: file.reason,
+      updatedAt: file.updated_at
+    })),
+    commands: commands.map((command) => ({
+      id: command.id,
+      command: command.command,
+      cwd: command.cwd,
+      exitCode: command.exit_code,
+      status: command.status,
+      importantOutput: safeJsonParse(command.important_output_json),
+      createdAt: command.created_at
+    }))
+  };
+});
+
 ipcMain.handle('session:rename', async (_event, params: { sessionId: string; title: string }) => {
   const title = params.title.trim();
 
@@ -1283,6 +2111,13 @@ ipcMain.handle('session:rename', async (_event, params: { sessionId: string; tit
 });
 
 ipcMain.handle('session:delete', async (_event, params: { sessionId: string }) => {
+  db.prepare('DELETE FROM compact_boundary WHERE session_id = ?').run(params.sessionId);
+  db.prepare('DELETE FROM rolling_summary WHERE session_id = ?').run(params.sessionId);
+  db.prepare('DELETE FROM context_pack WHERE session_id = ?').run(params.sessionId);
+  db.prepare('DELETE FROM command_log WHERE session_id = ?').run(params.sessionId);
+  db.prepare('DELETE FROM file_index WHERE session_id = ?').run(params.sessionId);
+  db.prepare('DELETE FROM task_state WHERE session_id = ?').run(params.sessionId);
+  db.prepare('DELETE FROM session_events WHERE session_id = ?').run(params.sessionId);
   db.prepare('DELETE FROM messages WHERE session_id = ?').run(params.sessionId);
   db.prepare('DELETE FROM sessions WHERE id = ?').run(params.sessionId);
 
@@ -1380,16 +2215,11 @@ ipcMain.handle('fileTree:createEntry', async (_event, params: CreateWorkspaceEnt
   return createWorkspaceEntry(params);
 });
 
-ipcMain.handle('file:readTextPreview', async (_event, filePath: string) => {
-  const fileStat = await assertEditableTextFile(filePath);
-  const content = await readFile(filePath, 'utf8');
+ipcMain.handle('file:readTextPreview', async (_event, params: string | { filePath: string; enableOcr?: boolean }) => {
+  const filePath = typeof params === 'string' ? params : params.filePath;
+  const enableOcr = typeof params === 'string' ? false : Boolean(params.enableOcr);
 
-  return {
-    content,
-    originalHash: hashTextContent(content),
-    size: fileStat.size,
-    modifiedAt: fileStat.mtime.toISOString()
-  };
+  return readPreviewableFile(filePath, enableOcr);
 });
 
 ipcMain.handle('file:saveText', async (_event, params: SaveTextFileParams) => {
@@ -1436,6 +2266,7 @@ ipcMain.handle('file:applyEdit', async (_event, params: ApplyFileEditParams) => 
       modifiedAt: result.modifiedAt,
       summary: params.summary
     });
+    updateSessionMemory(params.sessionId);
 
     return {
       ok: true,
@@ -1491,6 +2322,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
   const referencedFiles = await readReferencedFiles(params.workspacePath, filesToRead);
   const referencedFilesText = formatReferencedFiles(referencedFiles);
   const referencedFileNamesText = formatReferencedFileNames(referencedFiles);
+  const memoryContextText = formatMemoryContext(params.sessionId);
+  const historyMessages = getHistoryMessagesForModel(params.sessionId);
   recordSessionEvent(params.sessionId, 'referenced_files_read', {
     files: referencedFiles.map((file) => ({
       name: file.name,
@@ -1541,9 +2374,16 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自已读取引用文件。',
               'rename 必须包含 originalHash、targetPath，且 filePath 和 originalHash 必须来自已读取引用文件。',
               'create 必须包含 nextContent，filePath 必须在当前工作区内且是文本文件路径。',
-              '不要一次生成多个文件操作，不要生成 diff。删除和重命名文件必须等待用户确认。',
+              '不要一次生成多个文件操作，不要生成 diff。删除文件必须等待用户确认，重命名文件可直接生成建议。',
+              '系统会提供当前会话 Memory。Memory 只是辅助上下文；如果 Memory 与当前用户消息或当前文件内容冲突，以当前用户消息和当前文件内容为准。',
+              '如果你判断当前会话历史已经过长、旧讨论可以压缩，请在普通回复后追加一个 fenced JSON 块，格式为 ```compact-request。',
+              'compact-request JSON 必须为 {"type":"REQUEST_COMPACT","reason":"...","suggestedRange":{"beforeMessageId":"可选消息ID"}}。',
+              'compact-request 只是请求，系统会决定是否执行；不要在普通回复里提到这个内部请求。',
               '',
               `当前工作区路径：${params.workspacePath ?? '未选择'}`,
+              '当前会话 Memory：',
+              memoryContextText,
+              '',
               '用户消息路径定位结果：',
               locatedPathsText,
               '',
@@ -1554,7 +2394,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               workspaceTreeText
             ].join('\n')
           },
-          ...params.history.slice(-20),
+          ...historyMessages,
           {
             role: 'user',
             content: referencedFileNamesText
@@ -1582,7 +2422,8 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
     }
 
     const fileEditSuggestion = parseFileEditSuggestion(content, referencedFiles, params.sessionId);
-    const displayContent = stripFileEditSuggestionBlock(content) || content;
+    const compactRequest = parseCompactRequest(content);
+    const displayContent = stripCompactRequestBlock(stripFileEditSuggestionBlock(content)) || content;
     const assistantMessage = {
       id: createId('message'),
       session_id: params.sessionId,
@@ -1618,6 +2459,17 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
         summary: fileEditSuggestion.summary
       });
     }
+    if (compactRequest) {
+      recordSessionEvent(params.sessionId, 'compact_requested', {
+        source: 'model',
+        status: 'pending',
+        reason: compactRequest.reason,
+        beforeMessageId: compactRequest.beforeMessageId,
+        assistantMessageId: assistantMessage.id
+      });
+    }
+    updateSessionMemory(params.sessionId);
+    await generateRollingSummaryFromPendingCompact(params.sessionId);
 
     return {
       userMessage: mapMessage(userMessage),

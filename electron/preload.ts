@@ -19,6 +19,9 @@ type TextPreviewResult = {
   originalHash: string;
   size: number;
   modifiedAt: string;
+  isEditable: boolean;
+  contentKind: 'text' | 'office';
+  ocrEnabled: boolean;
 };
 
 type SaveTextResult = {
@@ -35,6 +38,7 @@ type FileEditSuggestion = {
   targetPath: string | null;
   fileName: string;
   originalHash: string | null;
+  originalContent: string | null;
   proposedContent: string | null;
   proposedHash: string | null;
   summary: string;
@@ -128,6 +132,36 @@ type SessionEventRecord = {
   createdAt: string;
 };
 
+type SessionMemoryDebug = {
+  taskState: unknown;
+  taskStateUpdatedAt: string | null;
+  contextPack: unknown;
+  contextPackCreatedAt: string | null;
+  rollingSummary: {
+    id: string;
+    summary: string;
+    fromMessageId: string | null;
+    toMessageId: string | null;
+    updatedAt: string;
+  } | null;
+  files: Array<{
+    id: string;
+    path: string;
+    operation: string;
+    reason: string | null;
+    updatedAt: string;
+  }>;
+  commands: Array<{
+    id: string;
+    command: string;
+    cwd: string | null;
+    exitCode: number | null;
+    status: string;
+    importantOutput: unknown;
+    createdAt: string;
+  }>;
+};
+
 type MessageChunk = {
   sessionId: string;
   content: string;
@@ -173,7 +207,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
   createWorkspaceEntry: (params: { type: 'file' | 'directory'; name: string }) => ipcRenderer.invoke('fileTree:createEntry', params) as Promise<FileTreeNode>,
-  readTextPreview: (filePath: string) => ipcRenderer.invoke('file:readTextPreview', filePath) as Promise<TextPreviewResult>,
+  readTextPreview: (params: string | { filePath: string; enableOcr?: boolean }) => ipcRenderer.invoke('file:readTextPreview', params) as Promise<TextPreviewResult>,
   saveTextFile: (params: SaveTextFileParams) => ipcRenderer.invoke('file:saveText', params) as Promise<SaveTextResult>,
   applyFileEdit: (params: ApplyFileEditParams) => ipcRenderer.invoke('file:applyEdit', params) as Promise<ApplyFileEditResult>,
   locatePaths: (params: { workspacePath: string | null; content: string }) => ipcRenderer.invoke('file:locatePaths', params) as Promise<LocatedPathResult[]>,
@@ -197,6 +231,7 @@ contextBridge.exposeInMainWorld('aiWorkspace', {
   listSessions: () => ipcRenderer.invoke('session:list') as Promise<SessionRecord[]>,
   getSession: (params: { sessionId: string }) => ipcRenderer.invoke('session:get', params) as Promise<{ session: SessionRecord; messages: ChatMessageRecord[] }>,
   getSessionEvents: (params: { sessionId: string }) => ipcRenderer.invoke('session:getEvents', params) as Promise<SessionEventRecord[]>,
+  getSessionMemory: (params: { sessionId: string }) => ipcRenderer.invoke('session:getMemory', params) as Promise<SessionMemoryDebug>,
   renameSession: (params: { sessionId: string; title: string }) => ipcRenderer.invoke('session:rename', params) as Promise<{ ok: boolean }>,
   deleteSession: (params: { sessionId: string }) => ipcRenderer.invoke('session:delete', params) as Promise<{ ok: boolean }>,
   exportSessionMarkdown: (params: { sessionId: string }) => ipcRenderer.invoke('session:exportMarkdown', params) as Promise<{ ok: boolean; path: string | null }>,

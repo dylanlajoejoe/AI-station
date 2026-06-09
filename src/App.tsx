@@ -50,13 +50,19 @@ type FilePreviewTab = {
   preview: FilePreviewState;
   draftContent: string;
   originalHash: string;
+  isEditable: boolean;
+  contentKind: 'text' | 'office';
+  ocrEnabled: boolean;
+  isOcrLoading: boolean;
   isDirty: boolean;
   isSaving: boolean;
   saveMessage: string;
 };
 
-const fileContextMenuItems = ['添加到对话', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
-const directoryContextMenuItems = ['添加到对话', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
+const fileContextMenuItems = ['添加到引用文件', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
+const directoryContextMenuItems = ['添加到引用文件', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
+const editableExtensions = new Set(['.txt', '.md', '.csv', '.json', '.ts', '.tsx', '.js', '.jsx', '.css', '.html', '.htm', '.xml', '.yaml', '.yml', '.log']);
+const readonlyExtensions = new Set(['.doc', '.docx', '.xlsx', '.ppt', '.pptx', '.pdf']);
 
 function formatFileSize(size: number | null) {
   if (size === null) {
@@ -82,6 +88,83 @@ function formatModifiedAt(value: string | null) {
   return new Date(value).toLocaleString('zh-CN', {
     hour12: false
   });
+}
+
+function getExtension(filePath: string) {
+  const fileName = filePath.split(/[\\/]/).pop() ?? filePath;
+  const dotIndex = fileName.lastIndexOf('.');
+
+  return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : '';
+}
+
+function getFileCapability(node: FileTreeNode) {
+  if (node.type === 'directory') {
+    return { label: '文件夹', tone: 'neutral', detail: '文件夹可引用名称，AI 不会直接读取整个文件夹内容。' };
+  }
+
+  const extension = getExtension(node.path);
+  const size = node.size ?? 0;
+
+  if (editableExtensions.has(extension)) {
+    return size > 1024 * 1024
+      ? { label: '过大', tone: 'warning', detail: '文本文件超过 1MB，不能预览、编辑或读取给 AI。' }
+      : { label: '可编辑', tone: 'editable', detail: '文本文件可预览、编辑，也可读取给 AI。' };
+  }
+
+  if (readonlyExtensions.has(extension)) {
+    return size > 10 * 1024 * 1024
+      ? { label: '过大', tone: 'warning', detail: '文档超过 10MB，暂不提取文本。' }
+      : { label: '只读', tone: 'readonly', detail: '文档可提取文本给 AI，但不能直接编辑保存。' };
+  }
+
+  return { label: '不支持', tone: 'unsupported', detail: '该格式暂不支持读取内容，可转换为 txt、md、docx、xlsx、pptx 或 pdf 后再使用。' };
+}
+
+function getReadLoadingMessage(node: FileTreeNode) {
+  const capability = getFileCapability(node);
+
+  if (capability.tone === 'readonly') {
+    return '正在提取文档文本，Office/PDF 文件可能需要稍等...';
+  }
+
+  if (capability.tone === 'warning' || capability.tone === 'unsupported') {
+    return capability.detail;
+  }
+
+  return '正在读取文件内容...';
+}
+
+function buildChangePreview(before: string | null, after: string | null) {
+  if (before === null || after === null) {
+    return { before, after };
+  }
+
+  let prefixLength = 0;
+  const minLength = Math.min(before.length, after.length);
+
+  while (prefixLength < minLength && before[prefixLength] === after[prefixLength]) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+
+  while (
+    suffixLength < minLength - prefixLength
+    && before[before.length - 1 - suffixLength] === after[after.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+
+  const contextSize = 180;
+  const beforeStart = Math.max(0, prefixLength - contextSize);
+  const beforeEnd = Math.min(before.length, before.length - suffixLength + contextSize);
+  const afterStart = Math.max(0, prefixLength - contextSize);
+  const afterEnd = Math.min(after.length, after.length - suffixLength + contextSize);
+
+  return {
+    before: `${beforeStart > 0 ? '...\n' : ''}${before.slice(beforeStart, beforeEnd)}${beforeEnd < before.length ? '\n...' : ''}`,
+    after: `${afterStart > 0 ? '...\n' : ''}${after.slice(afterStart, afterEnd)}${afterEnd < after.length ? '\n...' : ''}`
+  };
 }
 
 function getFriendlyErrorMessage(error: unknown, fallback: string) {
@@ -113,6 +196,18 @@ function getFriendlyErrorMessage(error: unknown, fallback: string) {
 
   if (message.includes('文件已被外部修改')) {
     return '文件已被其他程序修改，请重新打开后再保存。';
+  }
+
+  if (message.includes('超过 10MB')) {
+    return '文件超过 10MB，暂不支持读取。请压缩内容或转换为更小的文档后重试。';
+  }
+
+  if (message.includes('超过 1MB')) {
+    return '文本文件超过 1MB，暂不支持预览、编辑或读取给 AI。';
+  }
+
+  if (message.includes('暂不支持读取') || message.includes('暂不支持编辑保存')) {
+    return `${message}。建议转换为 txt、md、docx、xlsx、pptx 或 pdf。`;
   }
 
   if (message.includes('只能操作当前工作区内') || message.includes('只能保存当前工作区内') || message.includes('只能删除当前工作区内')) {
@@ -263,6 +358,8 @@ export function App() {
   const [activePreviewTabId, setActivePreviewTabId] = useState<string | null>(null);
   const [fileEditSuggestions, setFileEditSuggestions] = useState<FileEditSuggestion[]>([]);
   const [applyingEditId, setApplyingEditId] = useState<string | null>(null);
+  const [memoryDebug, setMemoryDebug] = useState<SessionMemoryDebug | null>(null);
+  const [isMemoryDebugOpen, setIsMemoryDebugOpen] = useState(false);
 
   const selectedFileIds = new Set(selectedFiles.map((file) => file.id));
   const visibleFileTree = filterTreeNodes(fileTree, fileSearchKeyword);
@@ -344,6 +441,10 @@ export function App() {
                 preview: { status: 'ready', content: result.content, message: '' },
                 draftContent: result.content,
                 originalHash: result.originalHash,
+                isEditable: result.isEditable,
+                contentKind: result.contentKind,
+                ocrEnabled: result.ocrEnabled,
+                isOcrLoading: false,
                 node: {
                   ...latestTab.node,
                   size: result.size,
@@ -412,6 +513,7 @@ export function App() {
         targetPath: payload.targetPath ?? null,
         fileName: payload.fileName,
         originalHash: payload.originalHash ?? null,
+        originalContent: null,
         proposedContent: '',
         proposedHash: payload.proposedHash ?? null,
         summary: payload.summary,
@@ -495,6 +597,17 @@ export function App() {
 
     await window.aiWorkspace.exportSessionMarkdown({ sessionId: currentSession.id });
     setOpenTopMenu(null);
+  };
+
+  const handleOpenMemoryDebug = async () => {
+    if (!currentSession) {
+      window.alert('当前没有会话');
+      return;
+    }
+
+    const memory = await window.aiWorkspace.getSessionMemory({ sessionId: currentSession.id });
+    setMemoryDebug(memory);
+    setIsMemoryDebugOpen(true);
   };
 
   const handleClearChatInput = () => {
@@ -583,9 +696,13 @@ export function App() {
         ...currentTabs,
         {
           node,
-          preview: { status: 'loading', content: '', message: '正在读取文件内容...' },
+          preview: { status: 'loading', content: '', message: getReadLoadingMessage(node) },
           draftContent: '',
           originalHash: '',
+          isEditable: false,
+          contentKind: 'text',
+          ocrEnabled: false,
+          isOcrLoading: false,
           isDirty: false,
           isSaving: false,
           saveMessage: ''
@@ -601,6 +718,10 @@ export function App() {
           preview: tab.isDirty ? tab.preview : { status: 'ready', content: result.content, message: '' },
           draftContent: tab.isDirty ? tab.draftContent : result.content,
           originalHash: tab.isDirty ? tab.originalHash : result.originalHash,
+          isEditable: result.isEditable,
+          contentKind: result.contentKind,
+          ocrEnabled: result.ocrEnabled,
+          isOcrLoading: false,
           node: {
             ...tab.node,
             size: result.size,
@@ -646,6 +767,13 @@ export function App() {
     if (!currentDirectory) {
       setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
         ? { ...currentTab, saveMessage: '请先选择工作区目录' }
+        : currentTab));
+      return;
+    }
+
+    if (!tab.isEditable) {
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+        ? { ...currentTab, saveMessage: 'Office 文件只读，不能保存' }
         : currentTab));
       return;
     }
@@ -714,6 +842,45 @@ export function App() {
     }
   };
 
+  const handleRunOcr = async (tab: FilePreviewTab) => {
+    setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+      ? {
+        ...currentTab,
+        isOcrLoading: true,
+        saveMessage: '正在识别图片文字...'
+      }
+      : currentTab));
+
+    try {
+      const result = await window.aiWorkspace.readTextPreview({
+        filePath: tab.node.path,
+        enableOcr: true
+      });
+
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+        ? {
+          ...currentTab,
+          preview: { status: 'ready', content: result.content, message: '' },
+          draftContent: result.content,
+          originalHash: result.originalHash,
+          isEditable: result.isEditable,
+          contentKind: result.contentKind,
+          ocrEnabled: result.ocrEnabled,
+          isOcrLoading: false,
+          saveMessage: 'OCR 已完成'
+        }
+        : currentTab));
+    } catch (error) {
+      setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
+        ? {
+          ...currentTab,
+          isOcrLoading: false,
+          saveMessage: getFriendlyErrorMessage(error, 'OCR 识别失败')
+        }
+        : currentTab));
+    }
+  };
+
   useEffect(() => {
     const handleSaveShortcut = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) {
@@ -722,7 +889,7 @@ export function App() {
 
       event.preventDefault();
 
-      if (!activePreviewTab?.isDirty || activePreviewTab.isSaving || activePreviewTab.preview.status !== 'ready') {
+      if (!activePreviewTab?.isEditable || !activePreviewTab.isDirty || activePreviewTab.isSaving || activePreviewTab.preview.status !== 'ready') {
         return;
       }
 
@@ -1087,10 +1254,80 @@ export function App() {
     setIsAiConfigOpen(false);
   };
 
+  const renderJsonBlock = (value: unknown) => (
+    <pre className="memory-debug-json">{JSON.stringify(value, null, 2) || 'null'}</pre>
+  );
+
+  const renderMemoryDebugModal = () => {
+    if (!isMemoryDebugOpen) {
+      return null;
+    }
+
+    return (
+      <div className="modal-backdrop" onClick={() => setIsMemoryDebugOpen(false)}>
+        <div className="memory-debug-modal" onClick={(event) => event.stopPropagation()}>
+          <div className="memory-debug-header">
+            <div>
+              <p>Memory 调试</p>
+              <span>{currentSession?.title ?? '当前会话'}</span>
+            </div>
+            <button onClick={() => setIsMemoryDebugOpen(false)} type="button">关闭</button>
+          </div>
+          {!memoryDebug ? (
+            <div className="memory-debug-empty">暂无 Memory 数据。</div>
+          ) : (
+            <div className="memory-debug-content">
+              <section>
+                <h3>任务状态</h3>
+                <small>更新时间：{memoryDebug.taskStateUpdatedAt ?? '-'}</small>
+                {renderJsonBlock(memoryDebug.taskState)}
+              </section>
+              <section>
+                <h3>滚动摘要</h3>
+                {memoryDebug.rollingSummary ? (
+                  <>
+                    <small>更新时间：{memoryDebug.rollingSummary.updatedAt}</small>
+                    <pre className="memory-debug-json">{memoryDebug.rollingSummary.summary}</pre>
+                  </>
+                ) : (
+                  <p className="memory-debug-empty">暂无 rolling_summary。</p>
+                )}
+              </section>
+              <section>
+                <h3>压缩包</h3>
+                <small>创建时间：{memoryDebug.contextPackCreatedAt ?? '-'}</small>
+                {renderJsonBlock(memoryDebug.contextPack)}
+              </section>
+              <section>
+                <h3>文件记录</h3>
+                {memoryDebug.files.length === 0 ? <p className="memory-debug-empty">暂无文件记录。</p> : memoryDebug.files.map((file) => (
+                  <div className="memory-debug-row" key={file.id}>
+                    <strong>{file.operation}</strong>
+                    <span title={file.path}>{file.path}</span>
+                  </div>
+                ))}
+              </section>
+              <section>
+                <h3>命令记录</h3>
+                {memoryDebug.commands.length === 0 ? <p className="memory-debug-empty">暂无命令记录。</p> : memoryDebug.commands.map((command) => (
+                  <div className="memory-debug-row" key={command.id}>
+                    <strong>{command.status}</strong>
+                    <span title={command.command}>{command.command}</span>
+                  </div>
+                ))}
+              </section>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderFileTreeNodes = (nodes: FileTreeViewNode[], level = 0) => nodes.map((node) => {
     const isDirectory = node.type === 'directory';
     const isSelected = selectedNode?.id === node.id;
     const isFileSelected = selectedFileIds.has(node.id);
+    const capability = getFileCapability(node);
 
     return (
       <div className="tree-node" key={node.id}>
@@ -1110,7 +1347,8 @@ export function App() {
           </span>
           <span className="folder-name">{node.name}</span>
           {node.isLoading && <span className="selected-mark">加载中</span>}
-          {isFileSelected && <span className="selected-mark">已选择</span>}
+          {!isDirectory && <span className={`capability-mark ${capability.tone}`} title={capability.detail}>{capability.label}</span>}
+          {isFileSelected && <span className="selected-mark">已引用</span>}
         </button>
         {isDirectory && node.isExpanded && node.children && renderFileTreeNodes(node.children, level + 1)}
         {isDirectory && node.isExpanded && node.children?.length === 0 && (
@@ -1135,10 +1373,10 @@ export function App() {
       >
         {items.map((item) => (
           <button
-            className={item === '添加到对话' ? 'context-menu-item primary' : 'context-menu-item'}
-            disabled={item !== '添加到对话'}
+            className={item === '添加到引用文件' ? 'context-menu-item primary' : 'context-menu-item'}
+            disabled={item !== '添加到引用文件'}
             key={item}
-            onClick={() => item === '添加到对话' && handleAddToChat(contextMenu.node)}
+            onClick={() => item === '添加到引用文件' && handleAddToChat(contextMenu.node)}
           >
             {item}
           </button>
@@ -1200,6 +1438,8 @@ export function App() {
     const isFailed = suggestion.status === 'failed';
     const actionLabel = suggestion.operation === 'delete' ? '删除文件' : suggestion.operation === 'create' ? '创建文件' : suggestion.operation === 'rename' ? '重命名文件' : '应用修改';
     const title = suggestion.operation === 'delete' ? 'AI 删除文件建议' : suggestion.operation === 'create' ? 'AI 创建文件建议' : suggestion.operation === 'rename' ? 'AI 重命名建议' : 'AI 文件修改建议';
+    const shouldShowContentCompare = suggestion.operation === 'update' || suggestion.operation === 'create' || suggestion.operation === 'delete';
+    const changePreview = buildChangePreview(suggestion.originalContent, suggestion.proposedContent);
 
     return (
       <div className="file-edit-suggestion">
@@ -1212,6 +1452,18 @@ export function App() {
           <div className="file-edit-suggestion-path" title={suggestion.targetPath}>目标：{suggestion.targetPath}</div>
         )}
         <p>{suggestion.summary}</p>
+        {shouldShowContentCompare && (
+          <div className="file-edit-compare">
+            <div className="file-edit-compare-pane before">
+              <div className="file-edit-compare-title">修改前</div>
+              <pre>{changePreview.before ?? (suggestion.operation === 'create' ? '新文件，无原内容' : '历史建议未保存原内容，请重新生成修改建议')}</pre>
+            </div>
+            <div className="file-edit-compare-pane after">
+              <div className="file-edit-compare-title">修改后</div>
+              <pre>{suggestion.operation === 'delete' ? '文件将被删除' : changePreview.after ?? '历史建议未保存修改后内容，请重新生成修改建议'}</pre>
+            </div>
+          </div>
+        )}
         <button
           disabled={isApplied || applyingEditId === suggestion.id || (suggestion.operation !== 'delete' && suggestion.operation !== 'rename' && !suggestion.proposedContent)}
           onClick={() => void handleApplyFileEdit(suggestion)}
@@ -1280,7 +1532,7 @@ export function App() {
           <div className="current-directory" title={currentDirectory ?? ''}>
             当前目录：{currentDirectory ?? '请选择一个本地目录'}
           </div>
-          <div className="soft-note">AI 可定位你输入的工作区内路径，但不会默认读取文件内容。</div>
+            <div className="soft-note">右键文件选择“添加到引用文件”后，支持的文本、Office 和 PDF 会被读取；过大或不支持格式会明确提示。</div>
           <nav className="folder-list" onContextMenu={handleWorkspaceContextMenu}>
             {fileTreeError && <div className="folder-empty">{fileTreeError}</div>}
             {!fileTreeError && fileTree.length === 0 && (
@@ -1357,7 +1609,7 @@ export function App() {
               <span className="status-text">{activePreviewTab ? '文本编辑' : '等待打开文件'}</span>
               <span>
                 {activePreviewTab
-                  ? `${activePreviewTab.node.name} · 修改于 ${formatModifiedAt(activePreviewTab.node.modifiedAt)}`
+                  ? `${activePreviewTab.node.name} · ${activePreviewTab.isEditable ? '可编辑文本' : '文档只读预览'} · 修改于 ${formatModifiedAt(activePreviewTab.node.modifiedAt)}`
                   : '点击左侧文件后，会在上方生成可关闭标签。'}
               </span>
               {activePreviewTab && (
@@ -1366,31 +1618,44 @@ export function App() {
                     {activePreviewTab.saveMessage || (activePreviewTab.isDirty ? '未保存' : '已同步')}
                   </span>
                   <button
-                    disabled={!activePreviewTab.isDirty || activePreviewTab.isSaving || activePreviewTab.preview.status !== 'ready'}
+                    disabled={!activePreviewTab.isDirty || activePreviewTab.isSaving || activePreviewTab.preview.status !== 'ready' || !activePreviewTab.isEditable}
                     onClick={() => void handleSavePreviewTab(activePreviewTab)}
                     type="button"
                   >
                     {activePreviewTab.isSaving ? '保存中' : '保存'}
                   </button>
+                  {!activePreviewTab.isEditable && activePreviewTab.contentKind === 'office' && (
+                    <button
+                      disabled={activePreviewTab.isOcrLoading || activePreviewTab.preview.status !== 'ready'}
+                      onClick={() => void handleRunOcr(activePreviewTab)}
+                      type="button"
+                    >
+                      {activePreviewTab.isOcrLoading ? 'OCR 中' : activePreviewTab.ocrEnabled ? '重新 OCR' : '识别图片文字'}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
             <article className="file-preview">
               {activePreviewTab ? (
                 activePreviewTab.preview.status === 'ready' ? (
-                  <textarea
-                    className="text-preview-editor"
-                    onChange={(event) => handlePreviewDraftChange(activePreviewTab.node.id, event.target.value)}
-                    spellCheck={false}
-                    value={activePreviewTab.draftContent}
-                  />
+                  activePreviewTab.isEditable ? (
+                    <textarea
+                      className="text-preview-editor"
+                      onChange={(event) => handlePreviewDraftChange(activePreviewTab.node.id, event.target.value)}
+                      spellCheck={false}
+                      value={activePreviewTab.draftContent}
+                    />
+                  ) : (
+                    <pre className="text-preview-content">{activePreviewTab.preview.content}</pre>
+                  )
                 ) : (
                   <div className={activePreviewTab.preview.status === 'error' ? 'preview-message error' : 'preview-message'}>
                     {activePreviewTab.preview.message}
                   </div>
                 )
               ) : (
-                <div className="preview-message">选择目录后，点击左侧文本文件，这里会以标签页方式打开文件内容。</div>
+                <div className="preview-message">选择目录后，点击左侧文件。文本文件可编辑，Office/PDF 只读预览，不支持或过大的文件会显示原因。</div>
               )}
             </article>
           </div>
@@ -1409,6 +1674,7 @@ export function App() {
               <strong>{formatContextLength(contextCharacterCount)}</strong>
               <small>约 {estimatedTokenCount.toLocaleString('zh-CN')} tokens</small>
             </div>
+            <button className="memory-debug-button" disabled={!currentSession} onClick={() => void handleOpenMemoryDebug()} type="button">Memory</button>
           </div>
           {isAiConfigOpen && (
             <div className="ai-config-box">
@@ -1477,6 +1743,7 @@ export function App() {
                   {selectedFiles.map((file) => (
                     <span className="selected-file-chip" key={file.id} title={file.path}>
                       <span className="selected-file-name">{file.name}</span>
+                      <span className={`selected-file-status ${getFileCapability(file).tone}`}>{getFileCapability(file).label}</span>
                       <button
                         aria-label={`移除引用 ${file.name}`}
                         className="remove-reference-button"
@@ -1523,6 +1790,7 @@ export function App() {
       {renderContextMenu()}
       {renderSessionContextMenu()}
       {renderWorkspaceContextMenu()}
+      {renderMemoryDebugModal()}
     </main>
   );
 }

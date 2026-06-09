@@ -19,6 +19,9 @@ type TextPreviewResult = {
   originalHash: string;
   size: number;
   modifiedAt: string;
+  isEditable: boolean;
+  contentKind: 'text' | 'office';
+  ocrEnabled: boolean;
 };
 
 type SaveTextResult = {
@@ -35,6 +38,7 @@ type FileEditSuggestion = {
   targetPath: string | null;
   fileName: string;
   originalHash: string | null;
+  originalContent: string | null;
   proposedContent: string | null;
   proposedHash: string | null;
   summary: string;
@@ -57,6 +61,36 @@ type SessionEventRecord = {
   type: string;
   payload: unknown;
   createdAt: string;
+};
+
+type SessionMemoryDebug = {
+  taskState: unknown;
+  taskStateUpdatedAt: string | null;
+  contextPack: unknown;
+  contextPackCreatedAt: string | null;
+  rollingSummary: {
+    id: string;
+    summary: string;
+    fromMessageId: string | null;
+    toMessageId: string | null;
+    updatedAt: string;
+  } | null;
+  files: Array<{
+    id: string;
+    path: string;
+    operation: string;
+    reason: string | null;
+    updatedAt: string;
+  }>;
+  commands: Array<{
+    id: string;
+    command: string;
+    cwd: string | null;
+    exitCode: number | null;
+    status: string;
+    importantOutput: unknown;
+    createdAt: string;
+  }>;
 };
 
 type SessionRecord = {
@@ -130,7 +164,10 @@ interface Window {
       type: 'file' | 'directory';
       name: string;
     }) => Promise<FileTreeNode>;
-    readTextPreview: (filePath: string) => Promise<TextPreviewResult>;
+    readTextPreview: (params: string | {
+      filePath: string;
+      enableOcr?: boolean;
+    }) => Promise<TextPreviewResult>;
     saveTextFile: (params: {
       workspacePath: string | null;
       filePath: string;
@@ -188,6 +225,9 @@ interface Window {
     getSessionEvents: (params: {
       sessionId: string;
     }) => Promise<SessionEventRecord[]>;
+    getSessionMemory: (params: {
+      sessionId: string;
+    }) => Promise<SessionMemoryDebug>;
     renameSession: (params: {
       sessionId: string;
       title: string;
