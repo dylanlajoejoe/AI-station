@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["main.ts", "preload.ts", "types.d.ts", "memoryCompression.ts"]
+  "include": ["main.ts", "preload.ts", "types.d.ts", "memoryCompression.ts", "officePreviewWorker.ts"]
 }

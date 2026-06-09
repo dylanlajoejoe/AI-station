@@ -525,14 +525,17 @@ textarea:focus-visible {
   border-radius: 10px;
   padding: 9px 10px;
   background: transparent;
-  color: var(--muted);
+  color: var(--blue);
   cursor: pointer;
   text-align: left;
   font-size: 13px;
+  font-weight: 700;
 }
 
 .context-menu-item:disabled {
+  color: var(--muted);
   cursor: not-allowed;
+  font-weight: 500;
 }
 
 .context-menu-item.primary {

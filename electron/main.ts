@@ -3,9 +3,8 @@ import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import { watch } from 'fs';
 import { mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'fs/promises';
-import { OfficeParser } from 'officeparser';
 import path from 'path';
-import WordExtractor from 'word-extractor';
+import { Worker } from 'worker_threads';
 import { compressTranscript, type CompressionInputMessage, type CompressionResult } from './memoryCompression.js';
 
 const isDev = !app.isPackaged;
@@ -290,6 +289,7 @@ let workspaceChangeTimer: NodeJS.Timeout | null = null;
 let mainWindowRef: BrowserWindow | null = null;
 const activeChatControllers = new Map<string, AbortController>();
 const previewCache = new Map<string, PreviewableFileResult>();
+const activeOfficePreviewReads = new Map<string, Promise<string>>();
 
 function normalizeAiConfig(config: Partial<AiConfig>): Partial<AiConfig> {
   return {
@@ -1046,62 +1046,72 @@ function getFileContentKind(filePath: string) {
   return 'unsupported' as const;
 }
 
-async function readDocText(filePath: string) {
-  const extractor = new WordExtractor();
-  const document = await extractor.extract(filePath);
+async function readOfficeText(filePath: string, enableOcr: boolean) {
+  const timeoutMs = enableOcr ? officeOcrTimeoutMs : officeReadTimeoutMs;
+  const workerPath = path.join(__dirname, 'officePreviewWorker.js');
+  const readKey = `${path.resolve(filePath)}::${enableOcr ? 'ocr' : 'text'}`;
+  const activeRead = activeOfficePreviewReads.get(readKey);
 
-  return [
-    document.getBody(),
-    document.getHeaders(),
-    document.getFooters(),
-    document.getFootnotes(),
-    document.getEndnotes(),
-    document.getAnnotations(),
-    document.getTextboxes()
-  ].filter(Boolean).join('\n\n').trim();
-}
+  if (activeRead) {
+    return activeRead;
+  }
 
-async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timeout: NodeJS.Timeout | null = null;
+  const readPromise = new Promise<string>((resolve, reject) => {
+    const worker = new Worker(workerPath, {
+      workerData: { filePath, enableOcr }
+    });
+    let isSettled = false;
+    const timeout = setTimeout(() => {
+      isSettled = true;
+      void worker.terminate();
+      reject(new Error(enableOcr ? 'Office/PDF OCR 提取超时' : 'Office/PDF 文本提取超时'));
+    }, timeoutMs);
+
+    worker.once('message', (result: { content?: string; error?: string }) => {
+      if (isSettled) {
+        return;
+      }
+
+      isSettled = true;
+      clearTimeout(timeout);
+      void worker.terminate();
+
+      if (result.error) {
+        reject(new Error(result.error));
+        return;
+      }
+
+      resolve(result.content ?? '');
+    });
+    worker.once('error', (error) => {
+      if (isSettled) {
+        return;
+      }
+
+      isSettled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    worker.once('exit', (code) => {
+      if (isSettled) {
+        return;
+      }
+
+      clearTimeout(timeout);
+      if (code !== 0) {
+        isSettled = true;
+        reject(new Error(`Office/PDF 文本提取进程异常退出：${code}`));
+      }
+    });
+  });
+
+  activeOfficePreviewReads.set(readKey, readPromise);
 
   try {
-    return await Promise.race([
-      task,
-      new Promise<T>((_resolve, reject) => {
-        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
-      })
-    ]);
+    return await readPromise;
   } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
+    activeOfficePreviewReads.delete(readKey);
   }
-}
-
-async function readOfficeText(filePath: string, enableOcr: boolean) {
-  const extension = path.extname(filePath).toLowerCase();
-  const timeoutMs = enableOcr ? officeOcrTimeoutMs : officeReadTimeoutMs;
-
-  if (extension === '.doc') {
-    return withTimeout(readDocText(filePath), timeoutMs, 'Office 文件文本提取超时');
-  }
-
-  const ast = await withTimeout(OfficeParser.parseOffice(filePath, {
-    ocr: enableOcr,
-    ocrConfig: enableOcr ? {
-      language: 'chi_sim+eng',
-      timeout: {
-        workerLoad: 60000,
-        recognition: 30000,
-        autoTerminate: 10000
-      }
-    } : undefined,
-    ignoreComments: true,
-    ignoreHeadersAndFooters: false
-  }), timeoutMs, enableOcr ? 'Office/PDF OCR 解析超时' : 'Office/PDF 文本解析超时');
-  const result = await withTimeout(ast.to('text'), timeoutMs, enableOcr ? 'Office/PDF OCR 提取超时' : 'Office/PDF 文本提取超时');
-
-  return typeof result.value === 'string' ? result.value.trim() : '';
 }
 
 function getPreviewCacheKey(filePath: string, size: number, modifiedAt: string, enableOcr: boolean) {
