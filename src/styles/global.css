@@ -559,6 +559,66 @@ textarea:focus-visible {
   background: rgba(159, 47, 47, 0.08);
 }
 
+.entry-dialog {
+  display: grid;
+  gap: 14px;
+  width: min(380px, calc(100vw - 48px));
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fffdf8;
+  box-shadow: 0 22px 60px rgba(47, 52, 55, 0.2);
+}
+
+.entry-dialog-header {
+  display: grid;
+  gap: 4px;
+}
+
+.entry-dialog-header strong {
+  color: var(--blue);
+  font-size: 16px;
+}
+
+.entry-dialog-header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.entry-dialog input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fffaf1;
+}
+
+.entry-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.entry-dialog-actions button {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: var(--panel-blue);
+  color: var(--blue);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.entry-dialog-actions button[type="submit"] {
+  background: var(--blue);
+  color: white;
+}
+
+.entry-dialog-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .session-list-box {
   display: grid;
   flex: 0 0 auto;

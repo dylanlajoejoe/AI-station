@@ -43,6 +43,15 @@ type PreviewContextMenuState = {
   tab: FilePreviewTab;
 } | null;
 
+type EntryDialogState = {
+  mode: 'create' | 'rename';
+  type: 'file' | 'directory';
+  title: string;
+  initialValue: string;
+  parentPath: string | null;
+  node: FileTreeNode | null;
+} | null;
+
 type TopMenuKey = 'file' | 'edit';
 
 type FilePreviewState = {
@@ -373,6 +382,9 @@ export function App() {
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] = useState<WorkspaceContextMenuState>(null);
   const [previewContextMenu, setPreviewContextMenu] = useState<PreviewContextMenuState>(null);
+  const [entryDialog, setEntryDialog] = useState<EntryDialogState>(null);
+  const [entryDialogValue, setEntryDialogValue] = useState('');
+  const [previewFontSize, setPreviewFontSize] = useState(13);
   const [openTopMenu, setOpenTopMenu] = useState<TopMenuKey | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const [openPreviewTabs, setOpenPreviewTabs] = useState<FilePreviewTab[]>([]);
@@ -913,28 +925,6 @@ export function App() {
     }
   };
 
-  useEffect(() => {
-    const handleSaveShortcut = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) {
-        return;
-      }
-
-      event.preventDefault();
-
-      if (!activePreviewTab?.isEditable || !activePreviewTab.isDirty || activePreviewTab.isSaving || activePreviewTab.preview.status !== 'ready') {
-        return;
-      }
-
-      void handleSavePreviewTab(activePreviewTab);
-    };
-
-    window.addEventListener('keydown', handleSaveShortcut);
-
-    return () => {
-      window.removeEventListener('keydown', handleSaveShortcut);
-    };
-  }, [activePreviewTab]);
-
   const handleClosePreviewTab = (nodeId: string) => {
     const tab = openPreviewTabs.find((previewTab) => previewTab.node.id === nodeId);
 
@@ -999,14 +989,25 @@ export function App() {
     setFileTree(nodes);
   };
 
-  const handleCreateWorkspaceEntry = async (type: 'file' | 'directory', parentPath: string | null = null) => {
+  const openCreateEntryDialog = (type: 'file' | 'directory', parentPath: string | null = null) => {
     const label = type === 'file' ? '文件' : '文件夹';
-    const name = window.prompt(`请输入新${label}名称${type === 'file' ? '（不填扩展名默认 .txt）' : ''}`);
-
+    setEntryDialog({
+      mode: 'create',
+      type,
+      title: `新建${label}`,
+      initialValue: '',
+      parentPath,
+      node: null
+    });
+    setEntryDialogValue('');
     setWorkspaceContextMenu(null);
     setContextMenu(null);
+  };
 
-    if (!name?.trim()) {
+  const handleCreateWorkspaceEntry = async (type: 'file' | 'directory', name: string, parentPath: string | null = null) => {
+    const label = type === 'file' ? '文件' : '文件夹';
+
+    if (!name.trim()) {
       return;
     }
 
@@ -1041,13 +1042,22 @@ export function App() {
     }
   };
 
-  const handleRenameWorkspaceEntry = async (node: FileTreeNode) => {
-    const newName = window.prompt(`请输入新的${node.type === 'directory' ? '文件夹' : '文件'}名称`, node.name);
-
+  const openRenameEntryDialog = (node: FileTreeNode) => {
+    setEntryDialog({
+      mode: 'rename',
+      type: node.type,
+      title: `重命名${node.type === 'directory' ? '文件夹' : '文件'}`,
+      initialValue: node.name,
+      parentPath: null,
+      node
+    });
+    setEntryDialogValue(node.name);
     setContextMenu(null);
     setPreviewContextMenu(null);
+  };
 
-    if (!newName?.trim() || newName.trim() === node.name) {
+  const handleRenameWorkspaceEntry = async (node: FileTreeNode, newName: string) => {
+    if (!newName.trim() || newName.trim() === node.name) {
       return;
     }
 
@@ -1083,12 +1093,12 @@ export function App() {
     }
 
     if (item === '新建文件') {
-      await handleCreateWorkspaceEntry('file', node.path);
+      openCreateEntryDialog('file', node.path);
       return;
     }
 
     if (item === '新建文件夹') {
-      await handleCreateWorkspaceEntry('directory', node.path);
+      openCreateEntryDialog('directory', node.path);
       return;
     }
 
@@ -1103,9 +1113,127 @@ export function App() {
     }
 
     if (item === '重命名') {
-      await handleRenameWorkspaceEntry(node);
+      openRenameEntryDialog(node);
     }
   };
+
+  const handleSubmitEntryDialog = async () => {
+    if (!entryDialog) {
+      return;
+    }
+
+    const value = entryDialogValue.trim();
+
+    if (!value) {
+      return;
+    }
+
+    if (entryDialog.mode === 'create') {
+      await handleCreateWorkspaceEntry(entryDialog.type, value, entryDialog.parentPath);
+    } else if (entryDialog.node) {
+      await handleRenameWorkspaceEntry(entryDialog.node, value);
+    }
+
+    setEntryDialog(null);
+    setEntryDialogValue('');
+  };
+
+  useEffect(() => {
+    const isEditingName = Boolean(entryDialog);
+    const handleShortcut = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const primary = event.ctrlKey || event.metaKey;
+
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+        setSessionContextMenu(null);
+        setWorkspaceContextMenu(null);
+        setPreviewContextMenu(null);
+        setOpenTopMenu(null);
+        if (entryDialog) {
+          setEntryDialog(null);
+        }
+        return;
+      }
+
+      if (isEditingName) {
+        return;
+      }
+
+      if (primary && key === 's') {
+        event.preventDefault();
+        if (activePreviewTab?.isEditable && activePreviewTab.isDirty && !activePreviewTab.isSaving && activePreviewTab.preview.status === 'ready') {
+          void handleSavePreviewTab(activePreviewTab);
+        }
+        return;
+      }
+
+      if (primary && key === 'w') {
+        event.preventDefault();
+        if (activePreviewTab) {
+          handleClosePreviewTab(activePreviewTab.node.id);
+        }
+        return;
+      }
+
+      if (primary && key === 'n') {
+        event.preventDefault();
+        openCreateEntryDialog(event.shiftKey ? 'directory' : 'file', selectedNode?.type === 'directory' ? selectedNode.path : null);
+        return;
+      }
+
+      if (key === 'f2') {
+        event.preventDefault();
+        if (selectedNode) {
+          openRenameEntryDialog(selectedNode);
+        } else if (activePreviewTab) {
+          openRenameEntryDialog(activePreviewTab.node);
+        }
+        return;
+      }
+
+      if (primary && event.shiftKey && key === 'c') {
+        event.preventDefault();
+        const node = selectedNode ?? activePreviewTab?.node;
+        if (node) {
+          void handleCopyText(node.path, '复制路径');
+        }
+        return;
+      }
+
+      if (primary && event.altKey && key === 'c') {
+        event.preventDefault();
+        const node = selectedNode ?? activePreviewTab?.node;
+        if (node) {
+          void handleCopyText(node.name, node.type === 'directory' ? '复制文件夹名' : '复制文件名');
+        }
+        return;
+      }
+
+      if (primary && (key === '=' || key === '+')) {
+        event.preventDefault();
+        setPreviewFontSize((currentSize) => Math.min(24, currentSize + 1));
+        return;
+      }
+
+      if (primary && key === '-') {
+        event.preventDefault();
+        setPreviewFontSize((currentSize) => Math.max(10, currentSize - 1));
+        return;
+      }
+
+      if (primary && key === '0') {
+        event.preventDefault();
+        setPreviewFontSize(13);
+      }
+    };
+
+    window.addEventListener('keydown', handleShortcut);
+
+    return () => {
+      window.removeEventListener('keydown', handleShortcut);
+    };
+  }, [activePreviewTab, entryDialog, selectedNode]);
 
   const handleAddToChat = (node: FileTreeNode) => {
     setSelectedFiles((currentFiles) => {
@@ -1135,6 +1263,16 @@ export function App() {
       ...position,
       tab
     });
+  };
+
+  const handlePreviewWheel = (event: React.WheelEvent<HTMLElement>) => {
+    if (!event.ctrlKey && !event.metaKey) {
+      return;
+    }
+
+    event.preventDefault();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    setPreviewFontSize((currentSize) => Math.min(24, Math.max(10, currentSize + direction)));
   };
 
   const handleRemoveReferenceFile = (node: FileTreeNode) => {
@@ -1563,8 +1701,42 @@ export function App() {
         onClick={(event) => event.stopPropagation()}
         style={{ left: workspaceContextMenu.x, top: workspaceContextMenu.y }}
       >
-        <button className="context-menu-item primary" onClick={() => void handleCreateWorkspaceEntry('file')}>新建文件</button>
-        <button className="context-menu-item primary" onClick={() => void handleCreateWorkspaceEntry('directory')}>新建文件夹</button>
+        <button className="context-menu-item primary" onClick={() => openCreateEntryDialog('file')}>新建文件</button>
+        <button className="context-menu-item primary" onClick={() => openCreateEntryDialog('directory')}>新建文件夹</button>
+      </div>
+    );
+  };
+
+  const renderEntryDialog = () => {
+    if (!entryDialog) {
+      return null;
+    }
+
+    return (
+      <div className="modal-backdrop" onClick={() => setEntryDialog(null)}>
+        <form
+          className="entry-dialog"
+          onClick={(event) => event.stopPropagation()}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleSubmitEntryDialog();
+          }}
+        >
+          <div className="entry-dialog-header">
+            <strong>{entryDialog.title}</strong>
+            <span>{entryDialog.mode === 'create' && entryDialog.type === 'file' ? '不填扩展名默认 .txt' : '请输入名称'}</span>
+          </div>
+          <input
+            autoFocus
+            onChange={(event) => setEntryDialogValue(event.target.value)}
+            placeholder={entryDialog.type === 'file' ? '例如 notes.txt' : '例如 新建文件夹'}
+            value={entryDialogValue}
+          />
+          <div className="entry-dialog-actions">
+            <button onClick={() => setEntryDialog(null)} type="button">取消</button>
+            <button disabled={!entryDialogValue.trim()} type="submit">确定</button>
+          </div>
+        </form>
       </div>
     );
   };
@@ -1784,6 +1956,10 @@ export function App() {
               </span>
               {activePreviewTab && (
                 <div className="preview-edit-actions">
+                  <span className="save-state" title="按 Ctrl + 鼠标滚轮调整预览字号">
+                    字号 {previewFontSize}px
+                  </span>
+                  <button onClick={() => setPreviewFontSize(13)} type="button">重置字号</button>
                   <span className={activePreviewTab.isDirty ? 'save-state dirty' : 'save-state'}>
                     {activePreviewTab.saveMessage || (activePreviewTab.isDirty ? '未保存' : '已同步')}
                   </span>
@@ -1806,7 +1982,11 @@ export function App() {
                 </div>
               )}
             </div>
-            <article className="file-preview" onContextMenu={(event) => handlePreviewContextMenu(event, activePreviewTab)}>
+            <article
+              className="file-preview"
+              onContextMenu={(event) => handlePreviewContextMenu(event, activePreviewTab)}
+              onWheel={handlePreviewWheel}
+            >
               {activePreviewTab ? (
                 activePreviewTab.preview.status === 'ready' ? (
                   activePreviewTab.isEditable ? (
@@ -1814,10 +1994,11 @@ export function App() {
                       className="text-preview-editor"
                       onChange={(event) => handlePreviewDraftChange(activePreviewTab.node.id, event.target.value)}
                       spellCheck={false}
+                      style={{ fontSize: previewFontSize }}
                       value={activePreviewTab.draftContent}
                     />
                   ) : (
-                    <pre className="text-preview-content">{activePreviewTab.preview.content}</pre>
+                    <pre className="text-preview-content" style={{ fontSize: previewFontSize }}>{activePreviewTab.preview.content}</pre>
                   )
                 ) : (
                   <div className={activePreviewTab.preview.status === 'error' ? 'preview-message error' : 'preview-message'}>
@@ -1953,14 +2134,16 @@ export function App() {
       </section>
 
       <footer className="status-bar">
-        <span>文本文件可编辑</span>
-        <span>AI 可定位当前工作区内路径</span>
-        <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
-      </footer>
+          <span>文本文件可编辑</span>
+          <span>AI 可定位当前工作区内路径</span>
+          <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
+          <span>快捷键：Ctrl+N 新建文件，Ctrl+Shift+N 新建文件夹，F2 重命名，Ctrl+W 关闭标签</span>
+        </footer>
       {renderContextMenu()}
       {renderSessionContextMenu()}
       {renderWorkspaceContextMenu()}
       {renderPreviewContextMenu()}
+      {renderEntryDialog()}
       {renderMemoryDebugModal()}
     </main>
   );
