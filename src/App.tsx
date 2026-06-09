@@ -1442,13 +1442,14 @@ export function App() {
         },
         {
           ...result.assistantMessage,
-          fileEditSuggestionId: result.fileEditSuggestion?.id
+          fileEditSuggestionId: result.fileEditSuggestion?.operation === 'delete' ? result.fileEditSuggestion.id : undefined
         }
       ]);
       if (result.fileEditSuggestion) {
         const suggestion = result.fileEditSuggestion as FileEditSuggestion;
-        setFileEditSuggestions((currentSuggestions) => [...currentSuggestions, suggestion]);
-        if (suggestion.operation !== 'delete') {
+        if (suggestion.operation === 'delete') {
+          setFileEditSuggestions((currentSuggestions) => [...currentSuggestions, suggestion]);
+        } else {
           void handleApplyFileEdit(suggestion);
         }
       }
@@ -1577,11 +1578,13 @@ export function App() {
       if (currentDirectory) {
         void window.aiWorkspace.listFileTree(currentDirectory).then(setFileTree);
       }
-      setMessages((currentMessages) => [...currentMessages, {
-        id: `file-edit-applied-${Date.now()}`,
-        role: 'assistant',
-        content: `${suggestion.operation === 'delete' ? '已删除文件' : suggestion.operation === 'create' ? '已创建文件' : suggestion.operation === 'rename' ? '已重命名文件' : '已应用 AI 修改'}：${suggestion.fileName}\n${suggestion.summary}`
-      }]);
+      if (suggestion.operation === 'delete') {
+        setMessages((currentMessages) => [...currentMessages, {
+          id: `file-edit-applied-${Date.now()}`,
+          role: 'assistant',
+          content: `已删除文件：${suggestion.fileName}`
+        }]);
+      }
     } catch (error) {
       const message = getFriendlyErrorMessage(error, '应用 AI 修改失败');
       setFileEditSuggestions((currentSuggestions) => currentSuggestions.map((currentSuggestion) => currentSuggestion.id === suggestion.id

@@ -873,7 +873,7 @@ function getRememberedReferencedFiles(sessionId: string, content: string): Refer
   const rows = db.prepare(`
     SELECT file_path, operation, updated_at
     FROM file_index
-    WHERE session_id = ? AND operation IN ('read', 'referenced')
+    WHERE session_id = ? AND operation IN ('read', 'referenced', 'edited')
     ORDER BY updated_at DESC
     LIMIT 30
   `).all(sessionId) as Array<{ file_path: string; operation: string; updated_at: string }>;
@@ -940,6 +940,30 @@ function rememberReferencedFiles(sessionId: string, files: ReferencedFileContent
       updated_at: now
     });
   }
+}
+
+function rememberEditedFile(sessionId: string, filePath: string | null | undefined, reason: string | null = null) {
+  if (!filePath) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO file_index (id, session_id, task_id, file_path, operation, reason, symbols_json, content_hash, mtime, created_at, updated_at)
+    VALUES (@id, @session_id, @task_id, @file_path, @operation, @reason, @symbols_json, @content_hash, @mtime, @created_at, @updated_at)
+  `).run({
+    id: createId('file-index'),
+    session_id: sessionId,
+    task_id: null,
+    file_path: filePath,
+    operation: 'edited',
+    reason,
+    symbols_json: '[]',
+    content_hash: null,
+    mtime: null,
+    created_at: now,
+    updated_at: now
+  });
 }
 
 function createId(prefix: string) {
@@ -1905,7 +1929,10 @@ function parseFileEditSuggestion(content: string, referencedFiles: ReferencedFil
 }
 
 function stripFileEditSuggestionBlock(content: string) {
-  return content.replace(/```file-edit-suggestion\s*[\s\S]*?```/g, '').trim();
+  return content
+    .replace(/```file-edit-suggestion\s*[\s\S]*?```/g, '')
+    .replace(/^\s*\{\s*"operation"\s*:\s*"(?:update|create|delete|rename)"[\s\S]*?\}\s*$/m, '')
+    .trim();
 }
 
 function parseCompactRequest(content: string): CompactRequest | null {
@@ -2634,6 +2661,7 @@ ipcMain.handle('file:applyEdit', async (_event, params: ApplyFileEditParams) => 
       modifiedAt: result.modifiedAt,
       summary: params.summary
     });
+    rememberEditedFile(params.sessionId, params.operation === 'rename' ? params.targetPath : params.filePath, params.summary);
     updateSessionMemory(params.sessionId);
 
     return {
@@ -2752,6 +2780,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               '你不能自己直接修改文件，但系统会在你生成文件操作建议后执行安全应用流程。',
               '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议；非删除操作会自动应用，不要要求用户再点击确认。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
+              'file-edit-suggestion JSON 是系统内部指令，普通说明里不要复述 JSON、字段名或“操作建议”等内部细节。',
               'JSON 字段必须包含 operation、filePath、summary。operation 只能是 update、create、delete、rename。',
               'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
               'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自已读取引用文件。',
