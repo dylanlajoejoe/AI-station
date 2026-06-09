@@ -205,6 +205,7 @@ type AiConfigView = {
 contextBridge.exposeInMainWorld('aiWorkspace', {
   platform: process.platform,
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
+  writeClipboardText: (text: string) => ipcRenderer.invoke('clipboard:writeText', text) as Promise<{ ok: boolean }>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
   createWorkspaceEntry: (params: { type: 'file' | 'directory'; name: string }) => ipcRenderer.invoke('fileTree:createEntry', params) as Promise<FileTreeNode>,
   renameWorkspaceEntry: (params: { filePath: string; newName: string }) => ipcRenderer.invoke('fileTree:renameEntry', params) as Promise<FileTreeNode>,

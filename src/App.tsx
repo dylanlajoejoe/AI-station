@@ -65,8 +65,8 @@ type FilePreviewTab = {
   saveMessage: string;
 };
 
-const fileContextMenuItems = ['添加到引用文件', '查看文件信息', '复制文件名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
-const directoryContextMenuItems = ['添加到引用文件', '展开/折叠', '查看文件夹信息', '复制文件夹名', '复制路径', '在系统中打开', '重命名', '从工作区隐藏'];
+const fileContextMenuItems = ['添加到引用文件', '复制文件名', '复制路径', '重命名'];
+const directoryContextMenuItems = ['添加到引用文件', '复制文件夹名', '复制路径', '重命名'];
 const enabledFileContextMenuItems = new Set(['添加到引用文件', '复制文件名', '复制路径', '重命名']);
 const enabledDirectoryContextMenuItems = new Set(['添加到引用文件', '复制文件夹名', '复制路径', '重命名']);
 const previewContextMenuItems = ['添加到引用文件', '复制文件名', '复制路径', '重命名'];
@@ -1023,16 +1023,20 @@ export function App() {
   };
 
   const handleCopyText = async (value: string, label: string) => {
-    await navigator.clipboard.writeText(value);
-    setContextMenu(null);
-    setPreviewContextMenu(null);
-    setWorkspaceContextMenu(null);
-    setSessionContextMenu(null);
-
-    if (activePreviewTab) {
-      setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === activePreviewTab.node.id
-        ? { ...tab, saveMessage: `${label}已复制` }
-        : tab));
+    try {
+      await window.aiWorkspace.writeClipboardText(value);
+      if (activePreviewTab) {
+        setOpenPreviewTabs((currentTabs) => currentTabs.map((tab) => tab.node.id === activePreviewTab.node.id
+          ? { ...tab, saveMessage: `${label}已复制` }
+          : tab));
+      }
+    } catch (error) {
+      window.alert(getFriendlyErrorMessage(error, '复制失败'));
+    } finally {
+      setContextMenu(null);
+      setPreviewContextMenu(null);
+      setWorkspaceContextMenu(null);
+      setSessionContextMenu(null);
     }
   };
 

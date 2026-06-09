@@ -159,6 +159,9 @@ interface Window {
       canceled: boolean;
       path: string | null;
     }>;
+    writeClipboardText: (text: string) => Promise<{
+      ok: boolean;
+    }>;
     listFileTree: (directoryPath: string) => Promise<FileTreeNode[]>;
     createWorkspaceEntry: (params: {
       type: 'file' | 'directory';

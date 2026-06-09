@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, clipboard, dialog, ipcMain } from 'electron';
 import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import { watch } from 'fs';
@@ -2213,6 +2213,12 @@ ipcMain.handle('fileTree:list', async (_event, directoryPath: string) => {
 
 ipcMain.handle('fileTree:createEntry', async (_event, params: CreateWorkspaceEntryParams) => {
   return createWorkspaceEntry(params);
+});
+
+ipcMain.handle('clipboard:writeText', async (_event, text: string) => {
+  clipboard.writeText(text);
+
+  return { ok: true };
 });
 
 ipcMain.handle('fileTree:renameEntry', async (_event, params: { filePath: string; newName: string }) => {
