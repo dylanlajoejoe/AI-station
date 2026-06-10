@@ -1129,6 +1129,12 @@ function isSensitivePath(workspacePath: string, targetPath: string) {
   });
 }
 
+function isSensitiveAbsolutePath(targetPath: string) {
+  const segments = path.resolve(targetPath).split(path.sep).filter(Boolean);
+
+  return segments.some((segment) => segment.startsWith('.') || sensitiveFileNames.has(segment.toLowerCase()) || segment === '.git');
+}
+
 async function assertEditableTextFile(filePath: string) {
   const fileStat = await stat(filePath);
 
@@ -1221,32 +1227,22 @@ function assertTextFileExtension(filePath: string) {
   }
 }
 
-async function resolveWorkspaceTargetPath(filePath: string) {
-  const resolvedWorkspacePath = await getTrustedWorkspacePath();
+async function resolveWorkspaceTargetPath(filePath: string, workspacePath?: string | null) {
   const resolvedFilePath = path.resolve(filePath);
 
-  if (!isInsideWorkspace(resolvedWorkspacePath, resolvedFilePath)) {
-    throw new Error('只能操作当前工作区内的文件');
-  }
-
   return {
-    resolvedWorkspacePath,
     resolvedFilePath
   };
 }
 
 async function writeEditableTextFile(params: WriteEditableTextFileParams) {
-  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
+  const { resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath, params.workspacePath);
 
   await assertEditableTextFile(resolvedFilePath);
 
   const realFilePath = await realpath(resolvedFilePath);
 
-  if (!isInsideWorkspace(resolvedWorkspacePath, realFilePath)) {
-    throw new Error('只能保存当前工作区内的文件');
-  }
-
-  if (isSensitivePath(resolvedWorkspacePath, realFilePath) && !params.sensitivePathConfirmed) {
+  if (isSensitiveAbsolutePath(realFilePath) && !params.sensitivePathConfirmed) {
     throw new Error('该路径属于敏感文件或隐藏路径，请确认后再保存');
   }
 
@@ -1273,14 +1269,14 @@ async function writeEditableTextFile(params: WriteEditableTextFileParams) {
 }
 
 async function createEditableTextFile(params: { filePath: string; content: string; sensitivePathConfirmed: boolean }) {
-  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
+  const { resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
   assertTextFileExtension(resolvedFilePath);
 
   if (Buffer.byteLength(params.content, 'utf8') > maxPreviewFileSize) {
     throw new Error('文件内容超过 1MB，已拒绝创建');
   }
 
-  if (isSensitivePath(resolvedWorkspacePath, resolvedFilePath) && !params.sensitivePathConfirmed) {
+  if (isSensitiveAbsolutePath(resolvedFilePath) && !params.sensitivePathConfirmed) {
     throw new Error('该路径属于敏感文件或隐藏路径，请确认后再创建');
   }
 
@@ -1310,15 +1306,11 @@ async function deleteEditableTextFile(params: { filePath: string; expectedOrigin
     throw new Error('删除文件前必须确认');
   }
 
-  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
+  const { resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
   await assertEditableTextFile(resolvedFilePath);
   const realFilePath = await realpath(resolvedFilePath);
 
-  if (!isInsideWorkspace(resolvedWorkspacePath, realFilePath)) {
-    throw new Error('只能删除当前工作区内的文件');
-  }
-
-  if (isSensitivePath(resolvedWorkspacePath, realFilePath) && !params.sensitivePathConfirmed) {
+  if (isSensitiveAbsolutePath(realFilePath) && !params.sensitivePathConfirmed) {
     throw new Error('该路径属于敏感文件或隐藏路径，请确认后再删除');
   }
 
@@ -1339,21 +1331,13 @@ async function deleteEditableTextFile(params: { filePath: string; expectedOrigin
 }
 
 async function renameWorkspaceEntry(params: { filePath: string; targetPath: string; expectedOriginalHash: string | null; sensitivePathConfirmed: boolean }) {
-  const { resolvedWorkspacePath, resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
+  const { resolvedFilePath } = await resolveWorkspaceTargetPath(params.filePath);
   const resolvedTargetPath = path.resolve(params.targetPath);
-
-  if (!isInsideWorkspace(resolvedWorkspacePath, resolvedTargetPath)) {
-    throw new Error('只能重命名到当前工作区内');
-  }
 
   const sourceStat = await stat(resolvedFilePath);
   const realSourcePath = await realpath(resolvedFilePath);
 
-  if (!isInsideWorkspace(resolvedWorkspacePath, realSourcePath)) {
-    throw new Error('只能重命名当前工作区内的文件');
-  }
-
-  if ((isSensitivePath(resolvedWorkspacePath, realSourcePath) || isSensitivePath(resolvedWorkspacePath, resolvedTargetPath)) && !params.sensitivePathConfirmed) {
+  if ((isSensitiveAbsolutePath(realSourcePath) || isSensitiveAbsolutePath(resolvedTargetPath)) && !params.sensitivePathConfirmed) {
     throw new Error('该路径属于敏感文件或隐藏路径，请确认后再重命名');
   }
 
@@ -1392,7 +1376,7 @@ async function createWorkspaceEntry(params: CreateWorkspaceEntryParams) {
     await setTrustedWorkspacePath(params.workspacePath);
   }
 
-  const workspacePath = await getTrustedWorkspacePath();
+  const workspacePath = params.workspacePath ? await realpath(params.workspacePath) : trustedWorkspacePath;
   const parentPath = params.parentPath ? path.resolve(params.parentPath) : workspacePath;
   const normalizedName = params.type === 'file' && !path.extname(params.name.trim())
     ? `${params.name.trim()}.txt`
@@ -1406,8 +1390,8 @@ async function createWorkspaceEntry(params: CreateWorkspaceEntryParams) {
     throw new Error('名称不能是绝对路径');
   }
 
-  if (!isInsideWorkspace(workspacePath, parentPath)) {
-    throw new Error('只能在当前工作区内创建');
+  if (!parentPath) {
+    throw new Error('请先选择创建位置');
   }
 
   const parentStat = await stat(parentPath);
@@ -1417,10 +1401,6 @@ async function createWorkspaceEntry(params: CreateWorkspaceEntryParams) {
   }
 
   const targetPath = path.resolve(parentPath, normalizedName);
-
-  if (!isInsideWorkspace(workspacePath, targetPath)) {
-    throw new Error('只能在当前工作区内创建');
-  }
 
   try {
     await stat(targetPath);
@@ -1614,7 +1594,7 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
         type: isDirectory ? 'directory' : 'file',
         size: targetStat.isFile() ? targetStat.size : null,
         modifiedAt: targetStat.mtime.toISOString(),
-        message: '已在当前工作区定位到该路径'
+        message: path.isAbsolute(candidate) ? '已按绝对路径定位到该文件或文件夹' : '已按当前目录定位到该路径'
       };
       results.push(foundResult);
       seenPaths.add(resolvedPath);
@@ -1627,7 +1607,7 @@ async function locatePathsInWorkspace(workspacePath: string | null, content: str
         type: null,
         size: null,
         modifiedAt: null,
-        message: '当前工作区内未找到该路径'
+        message: path.isAbsolute(candidate) ? '该绝对路径不存在或无法访问' : '当前目录下未找到该路径'
       });
     }
   }
@@ -2381,6 +2361,37 @@ ipcMain.handle('dialog:selectDirectory', async () => {
   };
 });
 
+ipcMain.handle('dialog:selectFile', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile']
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return {
+      canceled: true,
+      file: null,
+      directoryPath: null
+    };
+  }
+
+  const filePath = result.filePaths[0];
+  const fileStat = await stat(filePath);
+  const directoryPath = path.dirname(filePath);
+
+  return {
+    canceled: false,
+    directoryPath,
+    file: {
+      id: filePath,
+      name: path.basename(filePath),
+      path: filePath,
+      type: 'file' as const,
+      size: fileStat.size,
+      modifiedAt: fileStat.mtime.toISOString()
+    }
+  };
+});
+
 ipcMain.handle('session:create', async (_event, params: { workspacePath: string | null }) => {
   await setTrustedWorkspacePath(params.workspacePath);
   const now = new Date().toISOString();
@@ -2647,11 +2658,6 @@ ipcMain.handle('fileTree:renameEntry', async (_event, params: { filePath: string
 
   const targetPath = path.join(path.dirname(params.filePath), trimmedName);
   const sourceStat = await stat(params.filePath);
-  const workspacePath = await getTrustedWorkspacePath();
-
-  if (isSensitivePath(workspacePath, params.filePath) || isSensitivePath(workspacePath, targetPath)) {
-    throw new Error('隐藏或敏感路径暂不支持直接重命名');
-  }
 
   try {
     await stat(targetPath);
@@ -2838,11 +2844,12 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
             content: [
               '你是一个桌面 AI 助手。',
               '你可以看到用户已选择工作区的目录结构摘要，包括文件名、文件夹名、大小和修改时间。',
-              '如果用户消息里包含路径，系统会真实定位路径；定位到的文本、Office、PDF 文件会自动读取或提取文本并提供给你。',
+              '读取文件不限制在当前工作区内：如果用户消息里包含绝对路径，系统会按该绝对路径真实定位；定位到的文本、Office、PDF 文件会自动读取或提取文本并提供给你。',
               '用户显式引用的文件内容会由系统读取后提供给你；用户消息语义里能唯一定位到的文件名或文件主名会自动定位并读取内容；历史引用文件会根据当前问题自动匹配并重新读取。',
               '你只能使用系统提供的文件内容，不能假装读取未提供内容的文件；如果 Office/PDF 提取成功，就直接基于提取文本回答，不要说二进制文件无法读取。',
-              '如果用户语义能明确指向某个文件，不要要求用户再引用；只有无法唯一定位文件或文件内容未提供时，才要求用户提供更具体路径、引用文件或粘贴内容。',
+              '如果用户语义能明确指向某个文件或提供了可访问绝对路径，不要要求用户再引用；只有无法唯一定位文件或文件内容未提供时，才要求用户提供更具体路径、引用文件或粘贴内容。',
               '你不能自己直接修改文件，但系统会在你生成文件操作建议后执行安全应用流程。',
+              '文件操作不限制在当前工作区内：修改、创建、删除、重命名可以作用于任意可访问路径；遇到隐藏或敏感路径时系统会要求用户确认。',
               '如果用户明确要求修改、创建、删除或重命名文件，可以生成一个文件操作建议；非删除操作会自动应用，不要要求用户再点击确认。',
               '如需生成编辑建议，请在普通说明后追加一个 fenced JSON 块，格式必须为 ```file-edit-suggestion。',
               'file-edit-suggestion JSON 是系统内部指令，普通说明里不要复述 JSON、字段名或“操作建议”等内部细节。',
@@ -2852,7 +2859,7 @@ ipcMain.handle('chat:sendMessage', async (_event, params: SendMessageParams): Pr
               'update 必须包含 originalHash、nextContent，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
               'delete 必须包含 originalHash，且 filePath 和 originalHash 必须来自当前问题相关引用文件读取结果；这些内容可能来自用户引用，也可能来自用户消息路径定位后的自动读取。',
               'rename 只需要包含 targetPath；filePath 必须来自用户消息路径定位结果或已读取引用文件，不需要 originalHash 或文件内容。',
-              'create 必须包含 nextContent，filePath 必须在当前工作区内且是文本文件路径。',
+              'create 必须包含 nextContent，filePath 可以是任意可访问目录下的文本文件路径。',
               '不要生成 diff。删除文件必须等待用户确认，重命名、创建和更新文件可直接生成建议并由系统自动应用。',
               '如果用户同一句要求先重命名再修改内容，可生成 [rename, update] 数组；update 使用重命名前已读取文件的 filePath 和 originalHash，系统会在应用时把 update 重定向到重命名后的路径。',
               '系统会提供当前会话 Memory。Memory 只是辅助上下文；如果 Memory 与当前用户消息或当前文件内容冲突，以当前用户消息和当前文件内容为准。',

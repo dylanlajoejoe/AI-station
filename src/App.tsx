@@ -44,6 +44,11 @@ type PreviewContextMenuState = {
   target: HTMLTextAreaElement | HTMLElement | null;
 } | null;
 
+type PreviewEmptyContextMenuState = {
+  x: number;
+  y: number;
+} | null;
+
 type EntryDialogState = {
   mode: 'create' | 'rename';
   type: 'file' | 'directory';
@@ -64,6 +69,7 @@ type FilePreviewState = {
 type FilePreviewTab = {
   node: FileTreeNode;
   preview: FilePreviewState;
+  isStandalone: boolean;
   draftContent: string;
   originalHash: string;
   isEditable: boolean;
@@ -80,6 +86,7 @@ const directoryContextMenuItems = ['添加到引用文件', '新建文件', '新
 const enabledFileContextMenuItems = new Set(['添加到引用文件', '复制文件名', '复制路径', '重命名']);
 const enabledDirectoryContextMenuItems = new Set(['添加到引用文件', '新建文件', '新建文件夹', '复制文件夹名', '复制路径', '重命名']);
 const previewContextMenuItems = ['撤销', '剪切', '复制', '粘贴', '全选'];
+const previewEmptyContextMenuItems = ['打开文件', '打开文件夹'];
 const editableExtensions = new Set(['.txt', '.md', '.csv', '.json', '.ts', '.tsx', '.js', '.jsx', '.css', '.html', '.htm', '.xml', '.yaml', '.yml', '.log']);
 const readonlyExtensions = new Set(['.doc', '.docx', '.xlsx', '.ppt', '.pptx', '.pdf']);
 
@@ -114,6 +121,17 @@ function getExtension(filePath: string) {
   const dotIndex = fileName.lastIndexOf('.');
 
   return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : '';
+}
+
+function getParentDirectoryPath(filePath: string) {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const slashIndex = normalizedPath.lastIndexOf('/');
+
+  if (slashIndex <= 0) {
+    return null;
+  }
+
+  return filePath.slice(0, slashIndex);
 }
 
 function getFileCapability(node: FileTreeNode) {
@@ -241,7 +259,7 @@ function getFriendlyErrorMessage(error: unknown, fallback: string) {
   }
 
   if (message.includes('只能操作当前工作区内') || message.includes('只能保存当前工作区内') || message.includes('只能删除当前工作区内')) {
-    return '只能操作当前工作区内的文件。';
+    return '文件操作不限制当前目录，请确认目标路径可访问且不是受系统保护的位置。';
   }
 
   if (message.includes('敏感文件') || message.includes('隐藏路径')) {
@@ -359,6 +377,7 @@ export function App() {
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] = useState<WorkspaceContextMenuState>(null);
   const [previewContextMenu, setPreviewContextMenu] = useState<PreviewContextMenuState>(null);
+  const [previewEmptyContextMenu, setPreviewEmptyContextMenu] = useState<PreviewEmptyContextMenuState>(null);
   const [entryDialog, setEntryDialog] = useState<EntryDialogState>(null);
   const [entryDialogValue, setEntryDialogValue] = useState('');
   const [previewFontSize, setPreviewFontSize] = useState(13);
@@ -409,6 +428,7 @@ export function App() {
       setSessionContextMenu(null);
       setWorkspaceContextMenu(null);
       setPreviewContextMenu(null);
+      setPreviewEmptyContextMenu(null);
       setOpenTopMenu(null);
     };
 
@@ -564,6 +584,7 @@ export function App() {
     setContextMenu(null);
     setWorkspaceContextMenu(null);
     setPreviewContextMenu(null);
+    setPreviewEmptyContextMenu(null);
     setOpenTopMenu(null);
     const position = getContextMenuPosition(event.clientX, event.clientY, 4);
 
@@ -712,6 +733,7 @@ export function App() {
 
   const handleSelectDirectory = async () => {
     setWorkspaceContextMenu(null);
+    setPreviewEmptyContextMenu(null);
     const result = await window.aiWorkspace.selectDirectory();
 
     if (!result.canceled && result.path) {
@@ -732,7 +754,19 @@ export function App() {
     }
   };
 
-  const handleNodeClick = async (node: FileTreeNode) => {
+  const handleSelectFile = async () => {
+    setPreviewEmptyContextMenu(null);
+    const result = await window.aiWorkspace.selectFile();
+
+    if (result.canceled || !result.file) {
+      return;
+    }
+
+    setSelectedNode(result.file);
+    await handleNodeClick(result.file, true);
+  };
+
+  const handleNodeClick = async (node: FileTreeNode, isStandalone = false) => {
     setSelectedNode(node);
 
     if (node.type === 'directory') {
@@ -758,6 +792,7 @@ export function App() {
         {
           node,
           preview: { status: 'loading', content: '', message: getReadLoadingMessage(node) },
+          isStandalone,
           draftContent: '',
           originalHash: '',
           isEditable: false,
@@ -825,9 +860,9 @@ export function App() {
   };
 
   const handleSavePreviewTab = async (tab: FilePreviewTab) => {
-    if (!currentDirectory) {
+    if (!currentDirectory && !tab.isStandalone) {
       setOpenPreviewTabs((currentTabs) => currentTabs.map((currentTab) => currentTab.node.id === tab.node.id
-        ? { ...currentTab, saveMessage: '请先选择工作区目录' }
+        ? { ...currentTab, saveMessage: '请先打开文件或选择目录' }
         : currentTab));
       return;
     }
@@ -855,7 +890,7 @@ export function App() {
 
     try {
       const result = await window.aiWorkspace.saveTextFile({
-        workspacePath: currentDirectory,
+        workspacePath: tab.isStandalone ? getParentDirectoryPath(tab.node.path) : currentDirectory,
         filePath: tab.node.path,
         expectedOriginalHash: tab.originalHash,
         content: savedContent,
@@ -970,6 +1005,7 @@ export function App() {
     setSessionContextMenu(null);
     setWorkspaceContextMenu(null);
     setPreviewContextMenu(null);
+    setPreviewEmptyContextMenu(null);
     setOpenTopMenu(null);
     const itemCount = node.type === 'directory' ? directoryContextMenuItems.length : fileContextMenuItems.length;
     const position = getContextMenuPosition(event.clientX, event.clientY, itemCount);
@@ -987,6 +1023,7 @@ export function App() {
     setContextMenu(null);
     setSessionContextMenu(null);
     setPreviewContextMenu(null);
+    setPreviewEmptyContextMenu(null);
     setOpenTopMenu(null);
     const position = getContextMenuPosition(event.clientX, event.clientY, currentDirectory ? 2 : 1);
 
@@ -1030,6 +1067,7 @@ export function App() {
     setEntryDialogValue('');
     setWorkspaceContextMenu(null);
     setContextMenu(null);
+    setPreviewEmptyContextMenu(null);
   };
 
   const handleCreateWorkspaceEntry = async (type: 'file' | 'directory', name: string, parentPath: string | null = null) => {
@@ -1280,18 +1318,28 @@ export function App() {
     });
     setContextMenu(null);
     setPreviewContextMenu(null);
+    setPreviewEmptyContextMenu(null);
   };
 
   const handlePreviewContextMenu = (event: ReactMouseEvent, tab: FilePreviewTab | null) => {
+    event.preventDefault();
+
     if (!tab) {
+      setContextMenu(null);
+      setSessionContextMenu(null);
+      setWorkspaceContextMenu(null);
+      setPreviewContextMenu(null);
+      setOpenTopMenu(null);
+      const position = getContextMenuPosition(event.clientX, event.clientY, previewEmptyContextMenuItems.length);
+      setPreviewEmptyContextMenu(position);
       return;
     }
 
-    event.preventDefault();
     const target = event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLElement ? event.target : null;
     setContextMenu(null);
     setSessionContextMenu(null);
     setWorkspaceContextMenu(null);
+    setPreviewEmptyContextMenu(null);
     setOpenTopMenu(null);
     const position = getContextMenuPosition(event.clientX, event.clientY, previewContextMenuItems.length);
 
@@ -1327,6 +1375,17 @@ export function App() {
     }
 
     setPreviewContextMenu(null);
+  };
+
+  const handlePreviewEmptyContextMenuAction = async (item: string) => {
+    if (item === '打开文件') {
+      await handleSelectFile();
+      return;
+    }
+
+    if (item === '打开文件夹') {
+      await handleSelectDirectory();
+    }
   };
 
   const handlePreviewWheel = (event: React.WheelEvent<HTMLElement>) => {
@@ -1867,6 +1926,30 @@ export function App() {
     );
   };
 
+  const renderPreviewEmptyContextMenu = () => {
+    if (!previewEmptyContextMenu) {
+      return null;
+    }
+
+    return (
+      <div
+        className="context-menu"
+        onClick={(event) => event.stopPropagation()}
+        style={{ left: previewEmptyContextMenu.x, top: previewEmptyContextMenu.y }}
+      >
+        {previewEmptyContextMenuItems.map((item) => (
+          <button
+            className="context-menu-item primary"
+            key={item}
+            onClick={() => void handlePreviewEmptyContextMenuAction(item)}
+          >
+            {item}
+          </button>
+        ))}
+      </div>
+    );
+  };
+
   const renderFileEditSuggestion = (suggestionId: string | undefined) => {
     if (!suggestionId) {
       return null;
@@ -1960,7 +2043,7 @@ export function App() {
           <button className="ghost-button" onClick={() => setIsAiConfigOpen((isOpen) => !isOpen)}>
             AI 配置：{aiConfigStatus}
           </button>
-          <span className="safe-badge">只读模式</span>
+          <span className="safe-badge">全盘可操作</span>
         </div>
       </header>
 
@@ -1976,7 +2059,7 @@ export function App() {
           <div className="current-directory" title={currentDirectory ?? ''}>
             当前目录：{currentDirectory ?? '请选择一个本地目录'}
           </div>
-            <div className="soft-note">右键文件选择“添加到引用文件”后，支持的文本、Office 和 PDF 会被读取；过大或不支持格式会明确提示。</div>
+            <div className="soft-note">右键文件选择“添加到引用文件”后会读取内容；也可以在消息里提供任意可访问绝对路径。</div>
           <nav className="folder-list" onContextMenu={handleWorkspaceContextMenu}>
             {fileTreeError && <div className="folder-empty">{fileTreeError}</div>}
             {!fileTreeError && fileTree.length === 0 && (
@@ -2076,8 +2159,8 @@ export function App() {
               <span className="status-text">{activePreviewTab ? '文本编辑' : '等待打开文件'}</span>
               <span>
                 {activePreviewTab
-                  ? `${activePreviewTab.node.name} · ${activePreviewTab.isEditable ? '可编辑文本' : '文档只读预览'} · 修改于 ${formatModifiedAt(activePreviewTab.node.modifiedAt)}`
-                  : '点击左侧文件后，会在上方生成可关闭标签。'}
+                  ? `${activePreviewTab.node.name} · ${activePreviewTab.isStandalone ? '独立文件' : '当前目录'} · ${activePreviewTab.isEditable ? '可编辑文本' : '文档只读预览'} · 修改于 ${formatModifiedAt(activePreviewTab.node.modifiedAt)}`
+                  : '点击左侧文件或右键打开任意位置的单个文件。'}
               </span>
               {activePreviewTab && (
                 <div className="preview-edit-actions">
@@ -2131,7 +2214,7 @@ export function App() {
                   </div>
                 )
               ) : (
-                <div className="preview-message">选择目录后，点击左侧文件。文本文件可编辑，Office/PDF 只读预览，不支持或过大的文件会显示原因。</div>
+                <div className="preview-message">可以选择目录后点击左侧文件，也可以右键打开任意位置的单个文件。文本文件可编辑，Office/PDF 只读预览。</div>
               )}
             </article>
           </div>
@@ -2199,7 +2282,7 @@ export function App() {
           )}
           <div className="message-list" ref={messageListRef}>
             {messages.length === 0 && (
-              <div className="message-empty">输入问题后开始对话。输入工作区内路径时，系统会先真实定位文件。</div>
+              <div className="message-empty">输入问题后开始对话。输入任意可访问路径时，系统会先真实定位文件。</div>
             )}
             {messages.map((message) => (
               <div
@@ -2260,7 +2343,7 @@ export function App() {
 
       <footer className="status-bar">
           <span>文本文件可编辑</span>
-          <span>AI 可定位当前工作区内路径</span>
+          <span>AI 可读取任意可访问文件路径</span>
           <span>已引用 {selectedFiles.length} 个文件或文件夹</span>
           <span>快捷键：Ctrl+N 新建文件，Ctrl+Shift+N 新建文件夹，F2 重命名，Ctrl+W 关闭标签</span>
         </footer>
@@ -2268,6 +2351,7 @@ export function App() {
       {renderSessionContextMenu()}
       {renderWorkspaceContextMenu()}
       {renderPreviewContextMenu()}
+      {renderPreviewEmptyContextMenu()}
       {renderEntryDialog()}
       {renderMemoryDebugModal()}
     </main>

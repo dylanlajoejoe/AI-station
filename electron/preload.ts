@@ -5,6 +5,12 @@ type SelectDirectoryResult = {
   path: string | null;
 };
 
+type SelectFileResult = {
+  canceled: boolean;
+  file: FileTreeNode | null;
+  directoryPath: string | null;
+};
+
 type FileTreeNode = {
   id: string;
   name: string;
@@ -206,6 +212,7 @@ type AiConfigView = {
 contextBridge.exposeInMainWorld('aiWorkspace', {
   platform: process.platform,
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<SelectDirectoryResult>,
+  selectFile: () => ipcRenderer.invoke('dialog:selectFile') as Promise<SelectFileResult>,
   writeClipboardText: (text: string) => ipcRenderer.invoke('clipboard:writeText', text) as Promise<{ ok: boolean }>,
   listFileTree: (directoryPath: string) => ipcRenderer.invoke('fileTree:list', directoryPath) as Promise<FileTreeNode[]>,
   createWorkspaceEntry: (params: { type: 'file' | 'directory'; name: string; parentPath?: string | null; workspacePath?: string | null }) => ipcRenderer.invoke('fileTree:createEntry', params) as Promise<FileTreeNode>,

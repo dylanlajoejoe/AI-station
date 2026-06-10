@@ -159,6 +159,11 @@ interface Window {
       canceled: boolean;
       path: string | null;
     }>;
+    selectFile: () => Promise<{
+      canceled: boolean;
+      file: FileTreeNode | null;
+      directoryPath: string | null;
+    }>;
     writeClipboardText: (text: string) => Promise<{
       ok: boolean;
     }>;
