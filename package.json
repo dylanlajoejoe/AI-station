@@ -35,5 +35,17 @@
     "electron": "39.8.5",
     "typescript": "5.9.3",
     "vite": "7.3.5"
+  },
+  "build": {
+    "appId": "com.aiworkspace.connector",
+    "productName": "AI Workspace Connector",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
   }
 }
